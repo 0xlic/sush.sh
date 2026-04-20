@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::config::host::{Host, HostSource};
+use crate::config::host::Host;
 use crate::config::store;
 
 pub enum AppMode {
