@@ -347,10 +347,7 @@ impl App {
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 self.trigger_connect = true;
             }
-            (KeyCode::Enter, KeyModifiers::SHIFT) => {
-                self.trigger_sftp = true;
-            }
-            (KeyCode::F(2), _) => {
+            (KeyCode::Char('s'), KeyModifiers::NONE) => {
                 self.trigger_sftp = true;
             }
             (KeyCode::Up, _) => self.select_previous(),
@@ -368,14 +365,8 @@ impl App {
 
     fn handle_main_key_search(&mut self, k: KeyEvent) {
         match (k.code, k.modifiers) {
-            (KeyCode::Tab, _) | (KeyCode::Esc, _) => {
+            (KeyCode::Tab, _) | (KeyCode::Esc, _) | (KeyCode::Enter, _) => {
                 self.main_focus = MainFocus::HostList;
-            }
-            (KeyCode::Enter, KeyModifiers::NONE) => {
-                self.trigger_connect = true;
-            }
-            (KeyCode::Enter, KeyModifiers::SHIFT) => {
-                self.trigger_sftp = true;
             }
             (KeyCode::Up, _) => self.select_previous(),
             (KeyCode::Down, _) => self.select_next(),

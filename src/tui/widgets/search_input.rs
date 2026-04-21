@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph, Widget};
 
@@ -22,8 +22,15 @@ impl<'a> Widget for SearchInput<'a> {
         } else {
             Style::default()
         };
+        let block = if self.focused {
+            Block::bordered()
+                .title(" > ")
+                .border_style(Style::default().fg(Color::Cyan))
+        } else {
+            Block::bordered().title(" > ")
+        };
         Paragraph::new(Line::from(text).style(style))
-            .block(Block::bordered().title(" > "))
+            .block(block)
             .render(area, buf);
     }
 }
