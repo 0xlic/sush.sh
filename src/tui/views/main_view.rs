@@ -29,6 +29,7 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
         HostList {
             hosts: &app.hosts,
             indices: &app.filtered_indices,
+            focused: false,
         },
         chunks[1],
         list_state,
