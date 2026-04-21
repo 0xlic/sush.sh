@@ -41,7 +41,24 @@ impl ActiveSession {
 
     /// 打开 PTY channel 并请求 shell。
     pub async fn request_pty(&mut self, cols: u16, rows: u16) -> Result<()> {
-        let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
+        let term = {
+            let t = std::env::var("TERM").unwrap_or_default();
+            if matches!(
+                t.as_str(),
+                "xterm"
+                    | "xterm-256color"
+                    | "screen"
+                    | "screen-256color"
+                    | "tmux"
+                    | "tmux-256color"
+                    | "linux"
+                    | "vt100"
+            ) {
+                t
+            } else {
+                "xterm-256color".into()
+            }
+        };
         let ch = self.handle.channel_open_session().await?;
         ch.request_pty(false, &term, cols as u32, rows as u32, 0, 0, &[])
             .await?;

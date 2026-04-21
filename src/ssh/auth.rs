@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use russh::keys::agent::AgentIdentity;
@@ -30,13 +30,12 @@ pub async fn connect_with_host(host: &Host, mut prompt: PasswordPrompt) -> Resul
         {
             return Ok(session);
         }
-        if let Some(pass) = prompt(&format!("密钥密码 ({}): ", expanded.display())) {
-            if try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
+        if let Some(pass) = prompt(&format!("密钥密码 ({}): ", expanded.display()))
+            && try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
                 .await
                 .unwrap_or(false)
-            {
-                return Ok(session);
-            }
+        {
+            return Ok(session);
         }
     }
 
@@ -80,21 +79,20 @@ async fn try_agent_auth(
         if let Ok(res) = handle
             .authenticate_publickey_with(user, pub_key, hash_alg, &mut agent)
             .await
+            && res.success()
         {
-            if res.success() {
-                return Ok(true);
-            }
+            return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn expand_tilde(p: &PathBuf) -> PathBuf {
+fn expand_tilde(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
-    p.clone()
+    p.to_path_buf()
 }

@@ -9,6 +9,7 @@ pub struct PasswordDialog {
 }
 
 impl PasswordDialog {
+    #[allow(dead_code)]
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
