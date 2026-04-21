@@ -402,12 +402,13 @@ impl App {
                 }
             }
             (KeyCode::Char('q'), KeyModifiers::NONE) => self.exit_sftp(),
+            (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
+            (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
+            // D 删除、r 重命名暂无实现
             (KeyCode::Tab, _) => self.toggle_pane(),
             (KeyCode::Up, _) => self.pane_select_prev(),
             (KeyCode::Down, _) => self.pane_select_next(),
             (KeyCode::Enter, _) => self.trigger_pane_enter = true,
-            (KeyCode::F(5), _) => self.trigger_download = true,
-            (KeyCode::F(6), _) => self.trigger_upload = true,
             _ => {}
         }
     }
@@ -684,7 +685,7 @@ impl App {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         session.request_pty(cols, rows).await?;
 
-        let _ = session.takeover(0x00).await;
+        let _ = session.takeover(b"\x1b[Z").await;
         let _ = session.disconnect().await;
         self.mode = AppMode::Main;
         Ok(())

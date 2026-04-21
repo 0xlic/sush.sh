@@ -68,9 +68,9 @@ impl ActiveSession {
     }
 
     /// I/O 接管循环：stdin → 远程 PTY，远程输出 → stdout。
-    /// 检测到 `switch_byte`（0x00 = Ctrl-Space）时返回 Ok(true)。
+    /// 检测到 `switch_seq`（Shift+Tab = \x1b[Z）时返回 Ok(true)。
     /// 远程关闭/exit 时返回 Ok(false)。
-    pub async fn takeover(&mut self, switch_byte: u8) -> Result<bool> {
+    pub async fn takeover(&mut self, switch_seq: &[u8]) -> Result<bool> {
         let ch = self.channel.as_mut().context("PTY 未建立")?;
 
         // 用 spawn_blocking 阻塞读 stdin，通过 mpsc 向事件循环投递
@@ -97,7 +97,7 @@ impl ActiveSession {
         loop {
             tokio::select! {
                 Some(data) = stdin_rx.recv() => {
-                    if data.contains(&switch_byte) {
+                    if data.windows(switch_seq.len()).any(|w| w == switch_seq) {
                         return Ok(true);
                     }
                     ch.data(data.as_slice()).await?;
