@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::ListState;
 
-use crate::app::App;
+use crate::app::{App, MainFocus};
 use crate::tui::widgets::host_list::HostList;
 use crate::tui::widgets::search_input::SearchInput;
 use crate::tui::widgets::status_bar::StatusBar;
@@ -17,10 +17,12 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
         ])
         .split(f.area());
 
+    let search_focused = app.main_focus == MainFocus::Search;
+
     f.render_widget(
         SearchInput {
             query: &app.search_query,
-            focused: true,
+            focused: search_focused,
         },
         chunks[0],
     );
@@ -29,22 +31,25 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
         HostList {
             hosts: &app.hosts,
             indices: &app.filtered_indices,
-            focused: false,
+            focused: !search_focused,
         },
         chunks[1],
         list_state,
     );
 
-    f.render_widget(
-        StatusBar {
-            hints: &[
-                ("Enter", "SSH"),
-                ("F2", "SFTP"),
-                ("F5", "新建"),
-                ("?", "帮助"),
-                ("Q", "退出"),
-            ],
-        },
-        chunks[2],
-    );
+    let hints: &[(&str, &str)] = if search_focused {
+        &[("Enter", "SSH"), ("S+Enter", "SFTP")]
+    } else {
+        &[
+            ("/", "搜索"),
+            ("Enter", "SSH"),
+            ("S+Enter", "SFTP"),
+            ("n", "新建"),
+            ("e", "编辑"),
+            ("d", "删除"),
+            ("?", "帮助"),
+        ]
+    };
+
+    f.render_widget(StatusBar { hints }, chunks[2]);
 }

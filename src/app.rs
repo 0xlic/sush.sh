@@ -333,26 +333,59 @@ impl App {
     }
 
     fn handle_main_key(&mut self, k: KeyEvent) {
+        match self.main_focus {
+            MainFocus::HostList => self.handle_main_key_hostlist(k),
+            MainFocus::Search => self.handle_main_key_search(k),
+        }
+    }
+
+    fn handle_main_key_hostlist(&mut self, k: KeyEvent) {
         match (k.code, k.modifiers) {
+            (KeyCode::Tab, _) | (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                self.main_focus = MainFocus::Search;
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                self.trigger_connect = true;
+            }
+            (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                self.trigger_sftp = true;
+            }
+            (KeyCode::F(2), _) => {
+                self.trigger_sftp = true;
+            }
+            (KeyCode::Up, _) => self.select_previous(),
+            (KeyCode::Down, _) => self.select_next(),
+            (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                self.should_quit = true;
+            }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                if self.search_query.is_empty() {
-                    self.should_quit = true;
-                } else {
-                    self.search_query.clear();
-                    self.apply_search();
-                }
+                self.should_quit = true;
+            }
+            // n/e/d/? 暂无实现
+            _ => {}
+        }
+    }
+
+    fn handle_main_key_search(&mut self, k: KeyEvent) {
+        match (k.code, k.modifiers) {
+            (KeyCode::Tab, _) | (KeyCode::Esc, _) => {
+                self.main_focus = MainFocus::HostList;
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                self.trigger_connect = true;
+            }
+            (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                self.trigger_sftp = true;
+            }
+            (KeyCode::Up, _) => self.select_previous(),
+            (KeyCode::Down, _) => self.select_next(),
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.search_query.clear();
+                self.apply_search();
             }
             (KeyCode::Backspace, _) => {
                 self.search_query.pop();
                 self.apply_search();
-            }
-            (KeyCode::Up, _) => self.select_previous(),
-            (KeyCode::Down, _) => self.select_next(),
-            (KeyCode::Enter, KeyModifiers::NONE) => {
-                self.trigger_connect = true;
-            }
-            (KeyCode::F(2), _) => {
-                self.trigger_sftp = true;
             }
             (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
                 self.search_query.push(c);
