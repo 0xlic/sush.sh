@@ -67,6 +67,7 @@ pub struct App {
     pub trigger_upload: bool,
     pub trigger_refresh_local: bool,
     pub trigger_refresh_remote: bool,
+    pub trigger_ssh_resume: bool,
     pub active_session: Option<ActiveSession>,
     pub sftp_client: Option<SftpClient>,
     pub sftp_pane: Option<SftpPaneState>,
@@ -110,6 +111,7 @@ impl App {
             trigger_upload: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
+            trigger_ssh_resume: false,
             active_session: None,
             sftp_client: None,
             sftp_pane: None,
@@ -230,6 +232,36 @@ impl App {
                     {
                         pane.remote_entries = entries;
                     }
+                }
+            }
+
+            // SSH 恢复触发（从 SFTP 切回 SSH）
+            if self.trigger_ssh_resume {
+                self.trigger_ssh_resume = false;
+                std::mem::take(&mut bus).shutdown();
+                crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::terminal::LeaveAlternateScreen
+                )?;
+
+                let remote_closed = if let Some(session) = &mut self.active_session {
+                    !session.takeover(b"\x1c").await.unwrap_or(false)
+                } else {
+                    true
+                };
+
+                crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::terminal::EnterAlternateScreen
+                )?;
+                terminal.clear()?;
+                bus = EventBus::new();
+
+                if remote_closed {
+                    if let Some(s) = self.active_session.take() {
+                        let _ = s.disconnect().await;
+                    }
+                    self.exit_sftp();
                 }
             }
 
@@ -402,6 +434,7 @@ impl App {
                 }
             }
             (KeyCode::Char('q'), KeyModifiers::NONE) => self.exit_sftp(),
+            (KeyCode::Char('\\'), KeyModifiers::CONTROL) => self.trigger_ssh_resume = true,
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
             // D 删除、r 重命名暂无实现
@@ -685,9 +718,33 @@ impl App {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         session.request_pty(cols, rows).await?;
 
-        let _ = session.takeover(b"\x1b[Z").await;
-        let _ = session.disconnect().await;
-        self.mode = AppMode::Main;
+        let switched = session.takeover(b"\x1c").await.unwrap_or(false);
+        if switched {
+            // 保留 session，打开 SFTP，切换到 SFTP 界面
+            match SftpClient::open(&session).await {
+                Ok(client) => {
+                    let home = client.home_dir().await;
+                    let remote_entries = client.list_dir(&home).await.unwrap_or_default();
+                    let local_path = std::env::current_dir().unwrap_or_default();
+                    let local_entries = list_local(&local_path).unwrap_or_default();
+                    let mut pane = SftpPaneState::new(home);
+                    pane.remote_entries = remote_entries;
+                    pane.local_entries = local_entries;
+                    self.sftp_client = Some(client);
+                    self.sftp_pane = Some(pane);
+                    self.current_host_alias = Some(host.alias.clone());
+                    self.active_session = Some(session);
+                    self.mode = AppMode::Sftp;
+                }
+                Err(_) => {
+                    let _ = session.disconnect().await;
+                    self.mode = AppMode::Main;
+                }
+            }
+        } else {
+            let _ = session.disconnect().await;
+            self.mode = AppMode::Main;
+        }
         Ok(())
     }
 }
@@ -730,6 +787,7 @@ mod tests {
             trigger_upload: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
+            trigger_ssh_resume: false,
             active_session: None,
             sftp_client: None,
             sftp_pane: None,
