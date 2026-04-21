@@ -1,4 +1,4 @@
-# sush.sh (sushi) — 项目约束
+# sush.sh (sush) — 项目约束
 
 ## 项目简介
 

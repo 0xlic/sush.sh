@@ -1,4 +1,4 @@
-# sush.sh (sushi) Roadmap
+# sush.sh (sush) Roadmap
 
 ## v0.1 — MVP（当前）
 

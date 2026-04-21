@@ -1,4 +1,4 @@
-# sush.sh (sushi) 系统架构设计文档
+# sush.sh (sush) 系统架构设计文档
 
 ## 技术栈
 
@@ -156,7 +156,7 @@ enum HostSource {
 
 #### `config/store.rs` — 配置持久化
 
-配置文件位置：`~/.config/sushi/hosts.toml`
+配置文件位置：`~/.config/sush/hosts.toml`
 
 ```toml
 [metadata]
@@ -257,7 +257,7 @@ enum AppEvent {
 
 1. 终端切换到 raw mode（crossterm 已处理）
 2. 禁用 IXON 流控（`stty -ixon`，确保 Ctrl-Space 等键不被终端拦截）
-3. sushi 读取 stdin 字节流：
+3. sush 读取 stdin 字节流：
    - 检测到 `Ctrl-Space`（字节 `0x00`）→ 触发模式切换
    - 其他所有字节 → 原样转发给远程 PTY
 4. 远程 PTY 输出 → 原样写入 stdout
@@ -274,7 +274,7 @@ enum AppEvent {
 键盘 stdin
   │
   ▼
-sushi I/O 转发层 ──(检测前缀键)──→ 切换到 SFTP
+sush I/O 转发层 ──(检测前缀键)──→ 切换到 SFTP
   │
   │ (透传)
   ▼
@@ -303,14 +303,14 @@ SFTP 操作 ──→ russh-sftp ──→ 远程文件系统
 ## 配置与数据目录
 
 ```
-~/.config/sushi/
+~/.config/sush/
 ├── hosts.toml        # 主机配置（含导入的和手动添加的）
 └── settings.toml     # 全局设置（预留，v0.1 可能不需要）
 ```
 
 遵循 XDG 规范：
-- Linux/macOS: `~/.config/sushi/`
-- Windows: `%APPDATA%\sushi\`
+- Linux/macOS: `~/.config/sush/`
+- Windows: `%APPDATA%\sush\`
 
 使用 `dirs` crate 获取跨平台路径。
 
