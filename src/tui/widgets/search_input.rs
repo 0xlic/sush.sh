@@ -13,7 +13,7 @@ impl<'a> Widget for SearchInput<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let cursor = if self.focused { "█" } else { "" };
         let text = if self.query.is_empty() && !self.focused {
-            "搜索...".to_string()
+            "Search...".to_string()
         } else {
             format!("{}{}", self.query, cursor)
         };

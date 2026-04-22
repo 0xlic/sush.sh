@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/lichen/sush.sh"
 
 [dependencies]
-# 异步运行时
+# Async runtime
 tokio = { version = "1.52", features = ["full"] }
 
 # TUI
@@ -19,26 +19,26 @@ futures = "0.3"
 russh = "0.60"
 russh-sftp = "2.1"
 
-# 模糊搜索
+# Fuzzy search
 nucleo = "0.5"
 
-# SSH Config 解析
+# SSH config parsing
 ssh2-config = "0.7"
 
-# 配置序列化
+# Config serialization
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
 
-# 取消传输令牌
+# Transfer cancellation token
 tokio-util = "0.7"
 
-# 错误处理
+# Error handling
 anyhow = "1.0"
 
-# 跨平台路径
+# Cross-platform paths
 dirs = "6.0"
 
-# 主机 ID
+# Host ID
 uuid = { version = "1.23", features = ["v4"] }
 
 [dev-dependencies]

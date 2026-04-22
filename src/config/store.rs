@@ -42,8 +42,8 @@ pub fn load_from(path: &Path) -> Result<(Vec<Host>, String)> {
         return Ok((Vec::new(), String::new()));
     }
     let content =
-        fs::read_to_string(path).with_context(|| format!("读取配置失败: {}", path.display()))?;
-    let store: HostStore = toml::from_str(&content).context("解析配置失败")?;
+        fs::read_to_string(path).with_context(|| format!("failed to read config: {}", path.display()))?;
+    let store: HostStore = toml::from_str(&content).context("failed to parse config")?;
     Ok((store.hosts, store.metadata.ssh_config_hash))
 }
 
@@ -67,10 +67,10 @@ pub fn save_to(path: &Path, hosts: &[Host], ssh_config_hash: &str) -> Result<()>
     Ok(())
 }
 
-/// 合并：以 sush 配置为主，SSH config 只补充 sush 中不存在的主机。
-/// - sush 中已有的主机（任意来源）→ 保持原样，SSH config 的变化不影响它
-/// - SSH config 中有、sush 中没有 → 导入为新条目
-/// - SSH config 中删除的主机 → 不从 sush 中移除
+/// Merge with the persisted sush config taking precedence over SSH config.
+/// - Existing hosts from sush (any source) stay unchanged
+/// - Hosts present only in SSH config are imported as new entries
+/// - Hosts removed from SSH config are not removed from sush
 pub fn merge_ssh_config_hosts(existing: Vec<Host>, imported: Vec<Host>) -> Vec<Host> {
     let mut result = existing;
     for new_h in imported {
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn merge_adds_new_hosts_from_ssh_config() {
-        // sush 中没有的主机，从 SSH config 导入
+        // Import hosts that do not already exist in sush.
         let existing = vec![sample_host("m1", HostSource::Manual)];
         let imported = vec![sample_host("s1", HostSource::SshConfig)];
         let merged = merge_ssh_config_hosts(existing, imported);
@@ -125,10 +125,10 @@ mod tests {
 
     #[test]
     fn merge_sush_config_takes_precedence() {
-        // sush 中已有的主机，SSH config 的字段变化不覆盖它
+        // Existing sush data is not overwritten by SSH config changes.
         let mut existing = sample_host("s1", HostSource::SshConfig);
         existing.hostname = "sush-managed".into();
-        existing.description = "我的描述".into();
+        existing.description = "my description".into();
 
         let mut incoming = sample_host("s1", HostSource::SshConfig);
         incoming.hostname = "ssh-config-new".into();
@@ -136,12 +136,12 @@ mod tests {
         let merged = merge_ssh_config_hosts(vec![existing], vec![incoming]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].hostname, "sush-managed");
-        assert_eq!(merged[0].description, "我的描述");
+        assert_eq!(merged[0].description, "my description");
     }
 
     #[test]
     fn merge_does_not_remove_hosts_deleted_from_ssh_config() {
-        // SSH config 中删掉的主机，sush 中仍保留
+        // Hosts deleted from SSH config remain in sush.
         let existing = vec![sample_host("m1", HostSource::Manual)];
         let merged = merge_ssh_config_hosts(existing.clone(), vec![]);
         assert_eq!(merged.len(), 1);

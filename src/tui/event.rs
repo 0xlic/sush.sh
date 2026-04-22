@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-/// App 层消费的统一事件。
+/// Unified events consumed by the app layer.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum AppEvent {
@@ -18,7 +18,7 @@ pub struct EventBus {
 }
 
 impl Default for EventBus {
-    /// 返回一个不启动后台任务的空 bus，仅用于 mem::take 占位。
+    /// Return an empty bus without background tasks, only for mem::take placeholders.
     fn default() -> Self {
         let (_tx, rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
@@ -34,10 +34,10 @@ impl EventBus {
         Self { rx, cancel }
     }
 
-    /// 停止后台读取任务，消费掉所有已积压的事件。
+    /// Stop the background reader task and drop any queued events.
     pub fn shutdown(self) {
         self.cancel.cancel();
-        // rx drop 后 sender 会收到错误，后台任务退出
+        // After rx is dropped, sender errors out and the background task exits.
     }
 
     pub async fn next(&mut self) -> Option<AppEvent> {

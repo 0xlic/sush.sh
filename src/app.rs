@@ -44,11 +44,11 @@ enum LoopEvent {
     Ssh(Option<ChannelMsg>),
 }
 
-/// 传输方向：决定完成后刷新哪一侧目录。
+/// Transfer direction determines which pane is refreshed after completion.
 #[derive(Clone, Copy)]
 pub enum TransferDir {
-    Download, // remote → local，完成后刷新本地
-    Upload,   // local → remote，完成后刷新远程
+    Download, // remote -> local, refresh local when done
+    Upload,   // local -> remote, refresh remote when done
 }
 
 pub struct ActiveTransfer {
@@ -58,7 +58,7 @@ pub struct ActiveTransfer {
     pub rx: tokio::sync::mpsc::Receiver<TransferProgress>,
     pub cancel: tokio_util::sync::CancellationToken,
     pub done_at: Option<Instant>,
-    pub needs_refresh: bool, // 完成后还未刷新时为 true
+    pub needs_refresh: bool, // true until the completion-triggered refresh runs
 }
 
 pub struct App {
@@ -149,7 +149,7 @@ impl App {
         let mut bus = EventBus::new();
 
         while !self.should_quit {
-            // SSH 连接触发
+            // Trigger SSH connection.
             if self.trigger_connect {
                 self.trigger_connect = false;
                 if let Some(&idx) = self
@@ -161,12 +161,12 @@ impl App {
                         .ssh_connect_and_takeover(terminal, &mut bus, &host)
                         .await
                     {
-                        eprintln!("[连接错误: {e}]");
+                        eprintln!("[Connection error: {e}]");
                     }
                 }
             }
 
-            // SFTP 连接触发
+            // Trigger SFTP connection.
             if self.trigger_sftp {
                 self.trigger_sftp = false;
                 if let Some(&idx) = self
@@ -175,7 +175,7 @@ impl App {
                 {
                     let host = self.hosts[idx].clone();
                     if let Err(e) = self.sftp_connect(terminal, &mut bus, &host).await {
-                        eprintln!("[SFTP 错误: {e}]");
+                        eprintln!("[SFTP error: {e}]");
                     }
                 }
             }
@@ -183,36 +183,36 @@ impl App {
             if self.trigger_ssh_to_sftp {
                 self.trigger_ssh_to_sftp = false;
                 if let Err(e) = self.switch_ssh_to_sftp(terminal).await {
-                    eprintln!("[SFTP 错误: {e}]");
+                    eprintln!("[SFTP error: {e}]");
                     self.leave_ssh_mode(terminal).await?;
                 }
             }
 
-            // SFTP 目录导航触发
+            // Trigger SFTP directory navigation.
             if self.trigger_pane_enter {
                 self.trigger_pane_enter = false;
                 if let Err(e) = self.pane_enter().await {
-                    eprintln!("[导航错误: {e}]");
+                    eprintln!("[Navigation error: {e}]");
                 }
             }
 
-            // 下载触发
+            // Trigger download.
             if self.trigger_download {
                 self.trigger_download = false;
                 if let Err(e) = self.start_download().await {
-                    eprintln!("[下载错误: {e}]");
+                    eprintln!("[Download error: {e}]");
                 }
             }
 
-            // 上传触发
+            // Trigger upload.
             if self.trigger_upload {
                 self.trigger_upload = false;
                 if let Err(e) = self.start_upload().await {
-                    eprintln!("[上传错误: {e}]");
+                    eprintln!("[Upload error: {e}]");
                 }
             }
 
-            // 传输完成后刷新本地目录
+            // Refresh the local directory after a transfer completes.
             if self.trigger_refresh_local {
                 self.trigger_refresh_local = false;
                 if let Some(pane) = &mut self.sftp_pane
@@ -222,7 +222,7 @@ impl App {
                 }
             }
 
-            // 传输完成后刷新远程目录
+            // Refresh the remote directory after a transfer completes.
             if self.trigger_refresh_remote {
                 self.trigger_refresh_remote = false;
                 if let Some(pane) = &self.sftp_pane {
@@ -236,16 +236,16 @@ impl App {
                 }
             }
 
-            // SSH 恢复触发（从 SFTP 切回 SSH）
+            // Trigger SSH resume when switching back from SFTP.
             if self.trigger_ssh_resume {
                 self.trigger_ssh_resume = false;
                 if let Err(e) = self.resume_ssh_from_sftp().await {
-                    eprintln!("[SSH 错误: {e}]");
+                    eprintln!("[SSH error: {e}]");
                     self.leave_ssh_mode(terminal).await?;
                 }
             }
 
-            // 轮询传输进度
+            // Poll transfer progress.
             if let Some(tr) = &mut self.active_transfer {
                 while let Ok(prog) = tr.rx.try_recv() {
                     tr.progress = prog;
@@ -255,7 +255,7 @@ impl App {
                     TransferState::Completed | TransferState::Failed(_) | TransferState::Cancelled
                 );
                 if done {
-                    // 第一次检测到完成：触发目录刷新
+                    // Trigger the pane refresh only once when completion is first observed.
                     if tr.needs_refresh {
                         tr.needs_refresh = false;
                         match tr.dir {
@@ -408,7 +408,7 @@ impl App {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
-            // n/e/d/? 暂无实现
+            // n/e/d/? are not implemented yet.
             _ => {}
         }
     }
@@ -455,7 +455,7 @@ impl App {
             _ if is_switch_key(k) => self.trigger_ssh_resume = true,
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
-            // D 删除、r 重命名暂无实现
+            // D delete and r rename are not implemented yet.
             (KeyCode::Tab, _) => self.toggle_pane(),
             (KeyCode::Up, _) => self.pane_select_prev(),
             (KeyCode::Down, _) => self.pane_select_next(),
@@ -584,7 +584,7 @@ impl App {
                                 pane.remote_entries = entries;
                                 pane.list_state.select(Some(0));
                             }
-                            Err(e) => eprintln!("[列目录失败: {e}]"),
+                            Err(e) => eprintln!("[List directory failed: {e}]"),
                         }
                     }
                 }
@@ -610,7 +610,7 @@ impl App {
                             pane.local_entries = entries;
                             pane.list_state.select(Some(0));
                         }
-                        Err(e) => eprintln!("[列本地目录失败: {e}]"),
+                        Err(e) => eprintln!("[List local directory failed: {e}]"),
                     }
                 }
             }
@@ -654,7 +654,7 @@ impl App {
             state: TransferState::InProgress,
         };
         self.active_transfer = Some(ActiveTransfer {
-            verb: "下载",
+            verb: "Downloading",
             dir: TransferDir::Download,
             progress: init_prog,
             rx: handle.rx,
@@ -701,7 +701,7 @@ impl App {
             state: TransferState::InProgress,
         };
         self.active_transfer = Some(ActiveTransfer {
-            verb: "上传",
+            verb: "Uploading",
             dir: TransferDir::Upload,
             progress: init_prog,
             rx: handle.rx,
@@ -754,7 +754,7 @@ impl App {
                 return Ok(session);
             }
 
-            let title = format!("密钥密码 ({}): ", expanded.display());
+            let title = format!("Key passphrase ({}): ", expanded.display());
             if let Some(pass) = self.prompt_password(terminal, bus, &title).await?
                 && try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
                     .await
@@ -764,7 +764,7 @@ impl App {
             }
         }
 
-        let title = format!("{}@{} 的密码: ", host.user, host.hostname);
+        let title = format!("Password for {}@{}: ", host.user, host.hostname);
         if let Some(pass) = self.prompt_password(terminal, bus, &title).await? {
             let ok = session
                 .handle
@@ -776,7 +776,7 @@ impl App {
             }
         }
 
-        bail!("所有认证方式均失败")
+        bail!("all authentication methods failed")
     }
 
     async fn prompt_password(
@@ -818,7 +818,7 @@ impl App {
     ) -> Result<()> {
         if self.sftp_client.is_none() || self.sftp_pane.is_none() {
             let Some(session) = self.active_session.as_ref() else {
-                bail!("SSH 会话不存在");
+                bail!("SSH session does not exist");
             };
             let client = SftpClient::open(session).await?;
             let home = client.home_dir().await;

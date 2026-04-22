@@ -24,8 +24,8 @@ pub fn render(
         .split(f.area());
 
     let (label, path) = match pane.side {
-        PaneSide::Local => ("本地", pane.local_path.display().to_string()),
-        PaneSide::Remote => ("远程", pane.remote_path.clone()),
+        PaneSide::Local => ("Local", pane.local_path.display().to_string()),
+        PaneSide::Remote => ("Remote", pane.remote_path.clone()),
     };
     f.render_widget(
         Paragraph::new(format!(" SFTP: {host_alias}  [{label}] {path}")),
@@ -57,13 +57,13 @@ pub fn render(
         f.render_widget(
             StatusBar {
                 hints: &[
-                    ("Tab", "本地/远程"),
-                    ("d", "下载"),
-                    ("u", "上传"),
-                    ("D", "删除"),
-                    ("r", "重命名"),
+                    ("Tab", "Local/Remote"),
+                    ("d", "Download"),
+                    ("u", "Upload"),
+                    ("D", "Delete"),
+                    ("r", "Rename"),
                     ("Ctrl+\\", "SSH"),
-                    ("q", "退出"),
+                    ("q", "Quit"),
                 ],
             },
             chunks[2],

@@ -13,7 +13,7 @@ impl client::Handler for ClientHandler {
         &mut self,
         _server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // v0.1: TOFU，一律接受；v0.3 引入 known_hosts 校验
+        // v0.1: TOFU, accept all keys; v0.3 may add known_hosts verification.
         Ok(true)
     }
 }
@@ -28,14 +28,14 @@ impl ActiveSession {
         let config = Arc::new(client::Config::default());
         let handle = client::connect(config, (hostname, port), ClientHandler)
             .await
-            .with_context(|| format!("连接 {hostname}:{port} 失败"))?;
+            .with_context(|| format!("failed to connect to {hostname}:{port}"))?;
         Ok(Self {
             handle,
             channel: None,
         })
     }
 
-    /// 打开 PTY channel 并请求 shell。
+    /// Open a PTY channel and request a shell.
     pub async fn request_pty(&mut self, cols: u16, rows: u16) -> Result<()> {
         let term = {
             let t = std::env::var("TERM").unwrap_or_default();
@@ -68,19 +68,19 @@ impl ActiveSession {
     }
 
     pub async fn write_input(&mut self, data: &[u8]) -> Result<()> {
-        let ch = self.channel.as_mut().context("PTY 未建立")?;
+        let ch = self.channel.as_mut().context("PTY is not established")?;
         ch.data(data).await?;
         Ok(())
     }
 
     pub async fn resize_pty(&mut self, cols: u16, rows: u16) -> Result<()> {
-        let ch = self.channel.as_mut().context("PTY 未建立")?;
+        let ch = self.channel.as_mut().context("PTY is not established")?;
         ch.window_change(cols as u32, rows as u32, 0, 0).await?;
         Ok(())
     }
 
     pub async fn wait_channel_msg(&mut self) -> Result<Option<ChannelMsg>> {
-        let ch = self.channel.as_mut().context("PTY 未建立")?;
+        let ch = self.channel.as_mut().context("PTY is not established")?;
         Ok(ch.wait().await)
     }
 
@@ -99,7 +99,7 @@ pub async fn try_key_auth(
     passphrase: Option<&str>,
 ) -> Result<bool> {
     let key = russh::keys::load_secret_key(path, passphrase)
-        .with_context(|| format!("加载私钥失败: {}", path.display()))?;
+        .with_context(|| format!("failed to load private key: {}", path.display()))?;
     let hash_alg = handle
         .best_supported_rsa_hash()
         .await

@@ -1,7 +1,7 @@
 use crate::config::host::Host;
 
-/// 对 hosts 做多维模糊搜索，返回命中的原始索引（按匹配分数降序）。
-/// query 为空时返回 0..hosts.len() 的顺序索引。
+/// Perform multi-field fuzzy search over hosts and return matching original indices
+/// sorted by descending score. An empty query returns 0..hosts.len() in order.
 pub fn search(query: &str, hosts: &[Host]) -> Vec<usize> {
     if query.trim().is_empty() {
         return (0..hosts.len()).collect();

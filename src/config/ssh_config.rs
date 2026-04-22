@@ -19,13 +19,13 @@ pub fn import_ssh_config() -> Result<(Vec<Host>, String)> {
 
 pub fn parse_ssh_config(path: &Path) -> Result<(Vec<Host>, String)> {
     let content = fs::read_to_string(path)
-        .with_context(|| format!("读取 ssh config 失败: {}", path.display()))?;
+        .with_context(|| format!("failed to read ssh config: {}", path.display()))?;
     let hash = compute_hash(&content);
 
     let mut reader = BufReader::new(content.as_bytes());
     let config = SshConfig::default()
         .parse(&mut reader, ParseRule::ALLOW_UNKNOWN_FIELDS)
-        .map_err(|e| anyhow::anyhow!("解析 ssh config 失败: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to parse ssh config: {e}"))?;
 
     let hosts = config
         .get_hosts()
@@ -37,7 +37,7 @@ pub fn parse_ssh_config(path: &Path) -> Result<(Vec<Host>, String)> {
 }
 
 fn host_from_entry(entry: &ssh2_config::Host) -> Option<Host> {
-    // 选第一个非通配符、非反选的 pattern 作为 alias
+    // Use the first non-wildcard, non-negated pattern as the alias.
     let alias = entry.pattern.iter().find_map(|c| {
         if c.negated || is_wildcard(&c.pattern) {
             None

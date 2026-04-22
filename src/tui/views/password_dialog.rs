@@ -33,7 +33,8 @@ impl PasswordDialog {
         f.render_widget(block, area);
         f.render_widget(Paragraph::new(masked), inner[0]);
         f.render_widget(
-            Paragraph::new("Enter:确认  Esc:取消").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("Enter:Confirm  Esc:Cancel")
+                .style(Style::default().fg(Color::DarkGray)),
             inner[1],
         );
     }

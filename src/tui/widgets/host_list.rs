@@ -18,15 +18,15 @@ impl<'a> StatefulWidget for HostList<'a> {
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let block = if self.focused {
             Block::bordered()
-                .title(" 主机 ")
+                .title(" Hosts ")
                 .border_style(Style::default().fg(Color::Cyan))
         } else {
-            Block::bordered().title(" 主机 ")
+            Block::bordered().title(" Hosts ")
         };
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // inner 分为：列头 1 行 + 列表 + 描述 1 行
+        // Split the inner area into one header row, the list, and one description row.
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -36,23 +36,23 @@ impl<'a> StatefulWidget for HostList<'a> {
             ])
             .split(inner);
 
-        // 列头（与数据列对齐：2 空格偏移 + alias 16 + hostname 20 + tags）
+        // Header aligned with the data columns: 2 spaces + alias 16 + hostname 20 + tags.
         let header = Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                format!("{:<16}", "别名"),
+                format!("{:<16}", "Alias"),
                 Style::default()
                     .fg(Color::Gray)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:<20}", "地址"),
+                format!("{:<20}", "Address"),
                 Style::default()
                     .fg(Color::Gray)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "标签",
+                "Tags",
                 Style::default()
                     .fg(Color::Gray)
                     .add_modifier(Modifier::BOLD),
@@ -60,7 +60,7 @@ impl<'a> StatefulWidget for HostList<'a> {
         ]);
         Paragraph::new(header).render(sections[0], buf);
 
-        // 描述行：显示当前选中主机的 description
+        // Description row for the currently selected host.
         let desc = state
             .selected()
             .and_then(|sel| self.indices.get(sel))
@@ -76,7 +76,7 @@ impl<'a> StatefulWidget for HostList<'a> {
         };
         Paragraph::new(desc_spans).render(sections[2], buf);
 
-        // 数据列表
+        // Data list.
         let items: Vec<ListItem> = self
             .indices
             .iter()
@@ -99,7 +99,7 @@ impl<'a> StatefulWidget for HostList<'a> {
                         .fg(Color::Yellow),
                 )
                 .highlight_symbol("● "),
-            sections[1], // 数据区
+            sections[1], // list area
             buf,
             state,
         );
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn description_renders_when_selected() {
-        let hosts = vec![host_with_desc("192.168.7.2", "西城接诉即办开发环境")];
+        let hosts = vec![host_with_desc("192.168.7.2", "West District dev environment")];
         let indices = vec![0usize];
         let mut state = ListState::default();
         state.select(Some(0));
@@ -147,7 +147,7 @@ mod tests {
             &mut state,
         );
 
-        // ratatui 对双宽字符每个字符后跟一个空格占位，过滤掉再比对
+        // ratatui stores double-width characters with an extra placeholder cell; strip spaces before asserting.
         let content: String = buf
             .content()
             .iter()
@@ -156,7 +156,7 @@ mod tests {
             .join("")
             .replace(' ', "");
         assert!(
-            content.contains("西城接诉即办开发环境"),
+            content.contains("WestDistrictdevenvironment"),
             "description not found in buffer:\n{content}"
         );
     }

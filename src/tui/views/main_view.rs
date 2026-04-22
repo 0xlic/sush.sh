@@ -38,16 +38,16 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
     );
 
     let hints: &[(&str, &str)] = if search_focused {
-        &[("Enter/Esc", "返回")]
+        &[("Enter/Esc", "Back")]
     } else {
         &[
-            ("/", "搜索"),
+            ("/", "Search"),
             ("Enter", "SSH"),
             ("s", "SFTP"),
-            ("n", "新建"),
-            ("e", "编辑"),
-            ("d", "删除"),
-            ("?", "帮助"),
+            ("n", "New"),
+            ("e", "Edit"),
+            ("d", "Delete"),
+            ("?", "Help"),
         ]
     };
 

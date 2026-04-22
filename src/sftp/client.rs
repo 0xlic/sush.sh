@@ -21,7 +21,7 @@ impl SftpClient {
         channel.request_subsystem(true, "sftp").await?;
         let sftp = SftpSession::new(channel.into_stream())
             .await
-            .context("打开 SFTP subsystem 失败")?;
+            .context("failed to open SFTP subsystem")?;
         Ok(Self { session: sftp })
     }
 
@@ -30,7 +30,7 @@ impl SftpClient {
             .session
             .read_dir(path)
             .await
-            .with_context(|| format!("列目录失败: {path}"))?;
+            .with_context(|| format!("failed to list directory: {path}"))?;
         let mut result: Vec<FileEntry> = entries
             .map(|e| FileEntry {
                 name: e.file_name(),
@@ -38,7 +38,7 @@ impl SftpClient {
                 size: e.metadata().size.unwrap_or(0),
             })
             .collect();
-        // 目录在前、文件在后，各自按名称升序
+        // Directories first, files after, each sorted by name ascending.
         result.sort_by(|a, b| match (a.is_dir, b.is_dir) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
