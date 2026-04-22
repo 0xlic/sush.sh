@@ -4,6 +4,9 @@
 
 轻量级终端 SSH + SFTP 统一管理工具，TUI 界面，单文件分发。
 
+## 语言环境
+除了 `CLAUDE.md` 和 `doc` 目录使用中文，其他所有文件使用英文，包括commit message。
+
 ## 开发环境
 
 - Rust 1.95 (edition 2024)，通过 mise 管理，版本锁定在 `mise.toml`

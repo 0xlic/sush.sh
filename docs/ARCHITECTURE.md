@@ -17,7 +17,7 @@
 | 配置序列化 | serde + toml | serde 1.0, toml 1.1 | derive 宏 + TOML 读写 |
 | 错误处理 | anyhow | 1.0 | MVP 阶段简化错误处理 |
 | 跨平台路径 | dirs | 6.0 | XDG 规范目录 |
-| 主机 ID | uuid | 1.23 | v4 随机 UUID |
+| 主机 ID | uuid | 1.23 | 预留依赖，当前实现未使用 |
 
 ### 关于 russh + russh-sftp 的风险说明
 
@@ -32,7 +32,10 @@
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     main.rs                         │
-│                   App State Machine                 │
+│                 bootstrap App::run()                │
+├─────────────────────────────────────────────────────┤
+│                     app.rs                          │
+│                  App State Machine                  │
 ├─────────────────────────────────────────────────────┤
 │           ┌──────────┐                              │
 │           │ TUI Layer │ (ratatui + crossterm)       │
@@ -42,7 +45,7 @@
 │           └────┬─────┘                              │
 │                │ 事件                                │
 │           ┌────▼─────┐                              │
-│           │ 事件循环  │ 键盘/终端/SSH/传输事件         │
+│           │ 事件循环  │ stdin 字节流 + Tick           │
 │           └────┬─────┘                              │
 │                │                                    │
 │  ┌─────────────┼─────────────┐                      │
@@ -105,38 +108,42 @@ src/
 
 ```rust
 enum AppMode {
-    Main,           // 主界面：搜索 + 主机列表
-    Ssh(SshState),  // SSH 接管模式
-    Sftp(SftpState),// SFTP 文件浏览器
+    Main,  // 主界面：搜索 + 主机列表
+    Ssh,   // SSH 接管模式
+    Sftp,  // SFTP 文件浏览器
 }
 
 struct App {
     mode: AppMode,
     hosts: Vec<Host>,
     search_query: String,
-    filtered_hosts: Vec<usize>,  // 搜索结果索引
-    selected_index: usize,
-    session: Option<ActiveSession>,  // 当前活跃的 SSH/SFTP 连接
+    filtered_indices: Vec<usize>,    // 搜索结果索引
+    main_focus: MainFocus,           // 主界面焦点：列表 / 搜索框
+    list_state: ListState,           // 当前列表选中项
+    active_session: Option<ActiveSession>,
+    sftp_client: Option<SftpClient>,
+    sftp_pane: Option<SftpPaneState>,
+    active_transfer: Option<ActiveTransfer>,
 }
 ```
 
 **模式转换规则**：
 
 ```
-           Enter              Ctrl-Space
-  Main ──────────→ Ssh ◄──────────────→ Sftp
-   ▲                │                     │
-   │    exit/Ctrl-D │     双 Ctrl-C       │
-   └────────────────┘     ────────────────┘
-         F2
-  Main ──────→ Sftp（直接进入 SFTP，不经过 SSH）
+          Enter              Ctrl-\
+ Main ──────────→ Ssh ◄──────────────→ Sftp
+  ▲                │                     │
+  │    exit/Ctrl-D │ 双 Ctrl-C / q       │
+  └────────────────┘     ────────────────┘
+        s
+ Main ──────→ Sftp（直接进入 SFTP，不经过 SSH 模式）
 ```
 
 #### `config/host.rs` — 主机数据结构
 
 ```rust
 struct Host {
-    id: String,               // 唯一标识（UUID 或 alias）
+    id: String,               // 唯一标识；当前导入主机默认使用 alias
     alias: String,            // 显示名称
     hostname: String,         // IP 或域名
     port: u16,                // 默认 22
@@ -181,21 +188,21 @@ source = "ssh_config"
 2. 计算文件内容 hash，与上次导入对比
 3. hash 变化时执行增量同步：
    - 新 Host → 添加（source = SshConfig）
-   - 已有 Host 配置变化 → 更新
-   - ssh config 中删除的 Host → 不自动删除（避免误删用户数据）
-4. 跳过通配符 Host（`Host *`、`Host 192.168.*`）
+   - 已有 Host → 保持原样，不用 ssh config 覆盖
+   - ssh config 中删除的 Host → 不自动删除
+4. 从每个 `Host` 条目中选择第一个非通配符、非反选 pattern 作为 alias；若不存在则跳过
+5. `HostName` 缺失时回退 alias，`Port` 默认 `22`，`ProxyJump` 仅取第一个值
 
 #### `ssh/session.rs` — SSH 会话
 
 ```rust
 struct ActiveSession {
-    ssh_handle: russh::client::Handle,
-    channel: Option<russh::Channel>,  // PTY channel
-    sftp: Option<SftpClient>,         // 复用同一 SSH 连接的 SFTP subsystem
+    handle: russh::client::Handle,
+    channel: Option<russh::Channel>,  // 当前 PTY channel
 }
 ```
 
-**关键设计**：SSH 和 SFTP 共享同一条 TCP 连接。SSH 通过 PTY channel，SFTP 通过 SFTP subsystem channel，两者互不干扰。切换模式时不需要重新连接。
+**关键设计**：SSH 和 SFTP 共享同一条 TCP 连接。`ActiveSession` 持有底层 SSH handle；SSH 接管模式使用 PTY channel，SFTP 操作按需基于同一 handle 打开 subsystem channel。切换模式时不需要重新建立 TCP 连接。
 
 #### `ssh/auth.rs` — 认证流程
 
@@ -205,12 +212,12 @@ struct ActiveSession {
   └── 失败 ↓
 尝试 IdentityFile（按配置顺序）
   ├── 无密码私钥 → 直接使用
-  ├── 加密私钥 → 弹出密码输入框解密
+  ├── 加密私钥 → 弹出密码输入框后重试
   ├── 成功 → 连接
   └── 全部失败 ↓
 弹出密码输入框，尝试密码认证
   ├── 成功 → 连接
-  └── 失败 → 显示错误，返回主界面
+  └── 失败 → 调用层输出错误并保持在主界面
 ```
 
 #### `sftp/transfer.rs` — 文件传输
@@ -220,7 +227,6 @@ struct TransferProgress {
     filename: String,
     total_bytes: u64,
     transferred_bytes: u64,
-    speed_bps: u64,  // bytes per second
     state: TransferState,
 }
 
@@ -232,39 +238,35 @@ enum TransferState {
 }
 ```
 
-传输使用固定大小的缓冲区（32KB）逐块读写，每块完成后通过 channel 发送进度更新到 TUI 层。
+传输使用固定大小的缓冲区（32KB）逐块读写，每块完成后通过 channel 发送进度更新到 App 层；底部进度条显示方向、文件名和已传输/总大小。
 
 #### `tui/event.rs` — 事件循环
 
 ```rust
 enum AppEvent {
-    Key(KeyEvent),              // 键盘输入
-    Resize(u16, u16),           // 终端 resize
-    SshOutput(Vec<u8>),         // 远程 SSH 输出
-    TransferProgress(TransferProgress),  // 传输进度更新
-    ConnectionLost(String),     // 连接断开
+    Input(Vec<u8>),  // stdin 原始字节流
+    Tick,            // 周期性时钟，用于刷新/轮询
 }
 ```
 
-事件循环使用 `tokio::select!` 合并多个异步事件源：
-- crossterm 的键盘/终端事件
-- russh 的 SSH 数据通道
-- 传输进度通道
+事件循环由 `EventBus` 提供 `Input(Vec<u8>)` 和 `Tick` 两类事件：
+- `Input`：后台阻塞读取 stdin 后投递，由 App 在不同模式下分别解析为 TUI 按键或 SSH 原始输入
+- `Tick`：固定间隔轮询，用于处理终端 resize、传输状态收尾和其他周期性逻辑
+- SSH channel 消息不经过 `AppEvent`，而是在 SSH 模式下由 `tokio::select!` 与 `EventBus` 并行等待
 
 ## SSH 接管模式 — 前缀键实现细节
 
 进入 SSH 模式时：
 
 1. 终端切换到 raw mode（crossterm 已处理）
-2. 禁用 IXON 流控（`stty -ixon`，确保 Ctrl-Space 等键不被终端拦截）
-3. sush 读取 stdin 字节流：
-   - 检测到 `Ctrl-Space`（字节 `0x00`）→ 触发模式切换
+2. sush 读取 stdin 字节流：
+   - 检测到 `Ctrl-\`（字节 `0x1c`）→ 触发模式切换
    - 其他所有字节 → 原样转发给远程 PTY
-4. 远程 PTY 输出 → 原样写入 stdout
+3. 远程 PTY 输出 → 原样写入 stdout/stderr
 
 **退出 SSH 模式时**：恢复终端设置。
 
-**Ctrl-Space 的字节表示**：在 raw mode 下，Ctrl-Space 产生 `NUL`（`0x00`）。这在绝大多数远程程序中不会被使用，冲突概率极低。
+**Ctrl-\ 的字节表示**：在当前实现中，切换键使用 `0x1c`。SSH 模式直接检测原始字节流，SFTP/主界面通过 TUI 按键解码识别 `Ctrl-\`。
 
 ## 数据流
 
@@ -281,7 +283,7 @@ sush I/O 转发层 ──(检测前缀键)──→ 切换到 SFTP
 russh channel.data() ──→ 远程 PTY
   │
   ▼ (远程输出)
-russh channel.on_data() ──→ stdout
+russh channel.on_data() ──→ stdout/stderr
 ```
 
 ### SFTP 模式
@@ -308,11 +310,10 @@ SFTP 操作 ──→ russh-sftp ──→ 远程文件系统
 └── settings.toml     # 全局设置（预留，v0.1 可能不需要）
 ```
 
-遵循 XDG 规范：
-- Linux/macOS: `~/.config/sush/`
-- Windows: `%APPDATA%\sush\`
+当前实现配置目录为：
+- `dirs::home_dir()/.config/sush/`
 
-使用 `dirs` crate 获取跨平台路径。
+当前代码尚未使用 `dirs::config_dir()` 做平台差异化处理。
 
 ## 构建与分发
 
@@ -327,16 +328,17 @@ SFTP 操作 ──→ russh-sftp ──→ 远程文件系统
 
 ### CI/CD
 
-GitHub Actions workflow：
-- 每次 push 到 main：运行测试 + clippy
-- tag `v*`：自动构建所有平台 + 创建 GitHub Release + 上传二进制
+当前仓库尚未提交 CI workflow；后续可补充：
+- push 到主分支时运行测试 + clippy
+- tag `v*` 时自动构建各平台并发布 Release
 
 Linux 使用 musl 静态链接，确保单文件无动态库依赖。
 
 ## 错误处理策略
 
 v0.1 采用简单策略：
-- 连接失败 → 在 TUI 中显示错误弹窗，返回主界面
-- 传输失败 → 在进度栏显示错误信息
+- 连接/SFTP/导航/传输启动失败 → 通过 `eprintln!` 输出错误，保持或返回当前可交互界面
+- 认证过程中的密码输入 → 使用 TUI 密码弹窗
+- 传输完成、失败或取消 → 进度条短暂保留后恢复快捷键栏
 - 配置文件损坏 → 提示错误，使用默认空配置启动
 - 不做自动重连（v0.2+ 考虑）
