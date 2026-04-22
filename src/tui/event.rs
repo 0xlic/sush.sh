@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use crossterm::event::{Event as CtEvent, EventStream, KeyEvent};
-use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -10,8 +8,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum AppEvent {
-    Key(KeyEvent),
-    Resize(u16, u16),
+    Input(Vec<u8>),
     Tick,
 }
 
@@ -50,7 +47,23 @@ impl EventBus {
 
 fn spawn_terminal_reader(tx: mpsc::Sender<AppEvent>, cancel: CancellationToken) {
     tokio::spawn(async move {
-        let mut reader = EventStream::new();
+        let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(32);
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if input_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
         let mut ticker = time::interval(Duration::from_millis(250));
         loop {
             tokio::select! {
@@ -58,16 +71,10 @@ fn spawn_terminal_reader(tx: mpsc::Sender<AppEvent>, cancel: CancellationToken) 
                 _ = ticker.tick() => {
                     if tx.send(AppEvent::Tick).await.is_err() { break; }
                 }
-                Some(Ok(ev)) = reader.next() => {
-                    let mapped = match ev {
-                        CtEvent::Key(k) => Some(AppEvent::Key(k)),
-                        CtEvent::Resize(w, h) => Some(AppEvent::Resize(w, h)),
-                        _ => None,
-                    };
-                    if let Some(e) = mapped
-                        && tx.send(e).await.is_err() {
-                            break;
-                        }
+                Some(data) = input_rx.recv() => {
+                    if tx.send(AppEvent::Input(data)).await.is_err() {
+                        break;
+                    }
                 }
             }
         }

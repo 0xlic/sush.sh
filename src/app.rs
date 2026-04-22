@@ -1,11 +1,14 @@
 use std::io::{Stdout, stdout};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
+use russh::ChannelMsg;
+use tokio::io::AsyncWriteExt;
 
 use crate::config::host::Host;
 use crate::config::{ssh_config, store};
@@ -13,7 +16,7 @@ use crate::sftp::client::{SftpClient, list_local};
 use crate::sftp::transfer::{TransferProgress, TransferState, download, upload};
 use crate::sftp::{PaneSide, SftpPaneState};
 use crate::ssh::auth;
-use crate::ssh::session::ActiveSession;
+use crate::ssh::session::{ActiveSession, try_key_auth};
 use crate::tui::event::{AppEvent, EventBus};
 use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view};
 
@@ -23,6 +26,7 @@ pub enum MainFocus {
     Search,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Main,
     #[allow(dead_code)]
@@ -33,6 +37,11 @@ pub enum AppMode {
 struct PwdDialog {
     dialog: PasswordDialog,
     result: Option<Option<String>>,
+}
+
+enum LoopEvent {
+    App(AppEvent),
+    Ssh(Option<ChannelMsg>),
 }
 
 /// 传输方向：决定完成后刷新哪一侧目录。
@@ -68,12 +77,14 @@ pub struct App {
     pub trigger_refresh_local: bool,
     pub trigger_refresh_remote: bool,
     pub trigger_ssh_resume: bool,
+    pub trigger_ssh_to_sftp: bool,
     pub active_session: Option<ActiveSession>,
     pub sftp_client: Option<SftpClient>,
     pub sftp_pane: Option<SftpPaneState>,
     pub current_host_alias: Option<String>,
     pub active_transfer: Option<ActiveTransfer>,
     pub last_ctrl_c: Option<Instant>,
+    pub ssh_last_size: Option<(u16, u16)>,
     pwd_dialog: Option<PwdDialog>,
 }
 
@@ -112,12 +123,14 @@ impl App {
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
             trigger_ssh_resume: false,
+            trigger_ssh_to_sftp: false,
             active_session: None,
             sftp_client: None,
             sftp_pane: None,
             current_host_alias: None,
             active_transfer: None,
             last_ctrl_c: None,
+            ssh_last_size: None,
             pwd_dialog: None,
         })
     }
@@ -144,31 +157,11 @@ impl App {
                     .get(self.list_state.selected().unwrap_or(0))
                 {
                     let host = self.hosts[idx].clone();
-
-                    // 停止后台 reader，避免与 takeover 的 stdin 竞争
-                    std::mem::take(&mut bus).shutdown();
-
-                    crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::terminal::LeaveAlternateScreen
-                    )?;
-
-                    let ssh_result = self.ssh_connect_and_takeover(&host).await;
-
-                    crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::terminal::EnterAlternateScreen
-                    )?;
-                    terminal.clear()?;
-
-                    // 重建 EventBus：丢弃 SSH 期间所有积压的按键
-                    bus = EventBus::new();
-                    // 清空搜索框，防止 SSH 中输入的字符带回主界面
-                    self.search_query.clear();
-                    self.apply_search();
-
-                    if let Err(e) = ssh_result {
-                        eprintln!("\r\n[连接错误: {e}]\r\n");
+                    if let Err(e) = self
+                        .ssh_connect_and_takeover(terminal, &mut bus, &host)
+                        .await
+                    {
+                        eprintln!("[连接错误: {e}]");
                     }
                 }
             }
@@ -181,9 +174,17 @@ impl App {
                     .get(self.list_state.selected().unwrap_or(0))
                 {
                     let host = self.hosts[idx].clone();
-                    if let Err(e) = self.sftp_connect(&host).await {
+                    if let Err(e) = self.sftp_connect(terminal, &mut bus, &host).await {
                         eprintln!("[SFTP 错误: {e}]");
                     }
+                }
+            }
+
+            if self.trigger_ssh_to_sftp {
+                self.trigger_ssh_to_sftp = false;
+                if let Err(e) = self.switch_ssh_to_sftp(terminal).await {
+                    eprintln!("[SFTP 错误: {e}]");
+                    self.leave_ssh_mode(terminal).await?;
                 }
             }
 
@@ -238,30 +239,9 @@ impl App {
             // SSH 恢复触发（从 SFTP 切回 SSH）
             if self.trigger_ssh_resume {
                 self.trigger_ssh_resume = false;
-                std::mem::take(&mut bus).shutdown();
-                crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::terminal::LeaveAlternateScreen
-                )?;
-
-                let remote_closed = if let Some(session) = &mut self.active_session {
-                    !session.takeover(b"\x1c").await.unwrap_or(false)
-                } else {
-                    true
-                };
-
-                crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::terminal::EnterAlternateScreen
-                )?;
-                terminal.clear()?;
-                bus = EventBus::new();
-
-                if remote_closed {
-                    if let Some(s) = self.active_session.take() {
-                        let _ = s.disconnect().await;
-                    }
-                    self.exit_sftp();
+                if let Err(e) = self.resume_ssh_from_sftp().await {
+                    eprintln!("[SSH 错误: {e}]");
+                    self.leave_ssh_mode(terminal).await?;
                 }
             }
 
@@ -296,37 +276,75 @@ impl App {
                 }
             }
 
-            // 渲染
-            let mut list_state = std::mem::take(&mut self.list_state);
-            terminal.draw(|f| match self.mode {
-                AppMode::Main => {
-                    main_view::render(f, self, &mut list_state);
-                    if let Some(pwd) = &self.pwd_dialog {
-                        pwd.dialog.render(f);
-                    }
-                }
-                AppMode::Sftp => {
-                    if let Some(pane) = &mut self.sftp_pane {
-                        let alias = self.current_host_alias.as_deref().unwrap_or("");
-                        let transfer_info =
-                            self.active_transfer.as_ref().map(|t| (t.verb, &t.progress));
-                        sftp_view::render(f, alias, pane, transfer_info);
-                    }
-                }
-                AppMode::Ssh => {}
-            })?;
-            self.list_state = list_state;
+            self.render(terminal)?;
 
-            if let Some(ev) = bus.next().await {
-                self.handle_event(ev);
+            let next = if self.mode == AppMode::Ssh {
+                if let Some(session) = self.active_session.as_mut().filter(|s| s.has_pty()) {
+                    tokio::select! {
+                        ev = bus.next() => ev.map(LoopEvent::App),
+                        msg = session.wait_channel_msg() => Some(LoopEvent::Ssh(msg?)),
+                    }
+                } else {
+                    bus.next().await.map(LoopEvent::App)
+                }
+            } else {
+                bus.next().await.map(LoopEvent::App)
+            };
+
+            match next {
+                Some(LoopEvent::App(ev)) => self.handle_event(ev, terminal).await?,
+                Some(LoopEvent::Ssh(msg)) => self.handle_ssh_channel_msg(terminal, msg).await?,
+                None => break,
+            }
+        }
+        bus.shutdown();
+        Ok(())
+    }
+
+    async fn handle_event(
+        &mut self,
+        ev: AppEvent,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        match ev {
+            AppEvent::Input(data) => self.handle_input(data).await,
+            AppEvent::Tick => self.handle_tick(terminal).await,
+        }
+    }
+
+    async fn handle_tick(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        if self.mode == AppMode::Ssh {
+            self.sync_ssh_size().await?;
+            if self
+                .active_session
+                .as_ref()
+                .is_some_and(|session| !session.has_pty())
+            {
+                self.leave_ssh_mode(terminal).await?;
             }
         }
         Ok(())
     }
 
-    fn handle_event(&mut self, ev: AppEvent) {
-        if let AppEvent::Key(k) = ev {
-            self.handle_key(k);
+    async fn handle_input(&mut self, data: Vec<u8>) -> Result<()> {
+        if self.pwd_dialog.is_some() {
+            for key in decode_tui_keys(&data) {
+                self.handle_pwd_key(key);
+            }
+            return Ok(());
+        }
+
+        match self.mode {
+            AppMode::Main | AppMode::Sftp => {
+                for key in decode_tui_keys(&data) {
+                    self.handle_key(key);
+                }
+                Ok(())
+            }
+            AppMode::Ssh => self.handle_ssh_input(data).await,
         }
     }
 
@@ -434,7 +452,7 @@ impl App {
                 }
             }
             (KeyCode::Char('q'), KeyModifiers::NONE) => self.exit_sftp(),
-            (KeyCode::Char('\\'), KeyModifiers::CONTROL) => self.trigger_ssh_resume = true,
+            _ if is_switch_key(k) => self.trigger_ssh_resume = true,
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
             // D 删除、r 重命名暂无实现
@@ -510,20 +528,13 @@ impl App {
         self.list_state.select(Some(prev));
     }
 
-    async fn sftp_connect(&mut self, host: &Host) -> Result<()> {
-        let prompt: auth::PasswordPrompt = Box::new(|title: &str| -> Option<String> {
-            use std::io::Write;
-            eprint!("{title}");
-            let _ = std::io::stderr().flush();
-            let mut s = String::new();
-            let _ = crossterm::terminal::disable_raw_mode();
-            let _ = std::io::stdin().read_line(&mut s);
-            let _ = crossterm::terminal::enable_raw_mode();
-            let pass = s.trim_end_matches(['\n', '\r']).to_string();
-            if pass.is_empty() { None } else { Some(pass) }
-        });
-
-        let session = auth::connect_with_host(host, prompt).await?;
+    async fn sftp_connect(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        bus: &mut EventBus,
+        host: &Host,
+    ) -> Result<()> {
+        let session = self.connect_with_prompt(terminal, bus, host).await?;
         let client = SftpClient::open(&session).await?;
         let home = client.home_dir().await;
         let remote_entries = client.list_dir(&home).await.unwrap_or_default();
@@ -701,52 +712,375 @@ impl App {
         Ok(())
     }
 
-    async fn ssh_connect_and_takeover(&mut self, host: &Host) -> Result<()> {
-        let prompt: auth::PasswordPrompt = Box::new(|title: &str| -> Option<String> {
-            use std::io::Write;
-            eprint!("{title}");
-            let _ = std::io::stderr().flush();
-            let mut s = String::new();
-            let _ = crossterm::terminal::disable_raw_mode();
-            let _ = std::io::stdin().read_line(&mut s);
-            let _ = crossterm::terminal::enable_raw_mode();
-            let pass = s.trim_end_matches(['\n', '\r']).to_string();
-            if pass.is_empty() { None } else { Some(pass) }
-        });
-
-        let mut session = auth::connect_with_host(host, prompt).await?;
+    async fn ssh_connect_and_takeover(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        bus: &mut EventBus,
+        host: &Host,
+    ) -> Result<()> {
+        let mut session = self.connect_with_prompt(terminal, bus, host).await?;
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         session.request_pty(cols, rows).await?;
 
-        let switched = session.takeover(b"\x1c").await.unwrap_or(false);
-        if switched {
-            // 保留 session，打开 SFTP，切换到 SFTP 界面
-            match SftpClient::open(&session).await {
-                Ok(client) => {
-                    let home = client.home_dir().await;
-                    let remote_entries = client.list_dir(&home).await.unwrap_or_default();
-                    let local_path = std::env::current_dir().unwrap_or_default();
-                    let local_entries = list_local(&local_path).unwrap_or_default();
-                    let mut pane = SftpPaneState::new(home);
-                    pane.remote_entries = remote_entries;
-                    pane.local_entries = local_entries;
-                    self.sftp_client = Some(client);
-                    self.sftp_pane = Some(pane);
-                    self.current_host_alias = Some(host.alias.clone());
-                    self.active_session = Some(session);
-                    self.mode = AppMode::Sftp;
+        crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
+        self.active_session = Some(session);
+        self.current_host_alias = Some(host.alias.clone());
+        self.mode = AppMode::Ssh;
+        self.ssh_last_size = Some((cols, rows));
+        Ok(())
+    }
+
+    async fn connect_with_prompt(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        bus: &mut EventBus,
+        host: &Host,
+    ) -> Result<ActiveSession> {
+        let mut session = ActiveSession::connect(&host.hostname, host.port).await?;
+
+        if auth::try_agent_auth(&mut session.handle, &host.user)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(session);
+        }
+
+        for key_path in &host.identity_files {
+            let expanded = expand_tilde(key_path);
+            if try_key_auth(&mut session.handle, &host.user, &expanded, None)
+                .await
+                .unwrap_or(false)
+            {
+                return Ok(session);
+            }
+
+            let title = format!("密钥密码 ({}): ", expanded.display());
+            if let Some(pass) = self.prompt_password(terminal, bus, &title).await?
+                && try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
+                    .await
+                    .unwrap_or(false)
+            {
+                return Ok(session);
+            }
+        }
+
+        let title = format!("{}@{} 的密码: ", host.user, host.hostname);
+        if let Some(pass) = self.prompt_password(terminal, bus, &title).await? {
+            let ok = session
+                .handle
+                .authenticate_password(&host.user, &pass)
+                .await?
+                .success();
+            if ok {
+                return Ok(session);
+            }
+        }
+
+        bail!("所有认证方式均失败")
+    }
+
+    async fn prompt_password(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        bus: &mut EventBus,
+        title: &str,
+    ) -> Result<Option<String>> {
+        self.pwd_dialog = Some(PwdDialog {
+            dialog: PasswordDialog::new(title),
+            result: None,
+        });
+
+        loop {
+            self.render(terminal)?;
+            match bus.next().await {
+                Some(AppEvent::Input(data)) => {
+                    for key in decode_tui_keys(&data) {
+                        self.handle_pwd_key(key);
+                    }
                 }
-                Err(_) => {
-                    let _ = session.disconnect().await;
-                    self.mode = AppMode::Main;
+                Some(AppEvent::Tick) => {}
+                None => {
+                    self.pwd_dialog = None;
+                    return Ok(None);
                 }
             }
-        } else {
-            let _ = session.disconnect().await;
-            self.mode = AppMode::Main;
+
+            if let Some(result) = self.pwd_dialog.as_mut().and_then(|pwd| pwd.result.take()) {
+                self.pwd_dialog = None;
+                return Ok(result);
+            }
+        }
+    }
+
+    async fn switch_ssh_to_sftp(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        if self.sftp_client.is_none() || self.sftp_pane.is_none() {
+            let Some(session) = self.active_session.as_ref() else {
+                bail!("SSH 会话不存在");
+            };
+            let client = SftpClient::open(session).await?;
+            let home = client.home_dir().await;
+            let remote_entries = client.list_dir(&home).await.unwrap_or_default();
+            let local_path = std::env::current_dir().unwrap_or_default();
+            let local_entries = list_local(&local_path).unwrap_or_default();
+
+            let mut pane = SftpPaneState::new(home);
+            pane.remote_entries = remote_entries;
+            pane.local_entries = local_entries;
+            self.sftp_client = Some(client);
+            self.sftp_pane = Some(pane);
+        }
+
+        crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+        terminal.clear()?;
+        self.mode = AppMode::Sftp;
+        Ok(())
+    }
+
+    async fn resume_ssh_from_sftp(&mut self) -> Result<()> {
+        let Some(session) = self.active_session.as_mut() else {
+            self.exit_sftp();
+            return Ok(());
+        };
+
+        if !session.has_pty() {
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+            session.request_pty(cols, rows).await?;
+            self.ssh_last_size = Some((cols, rows));
+        }
+
+        crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
+        self.mode = AppMode::Ssh;
+        Ok(())
+    }
+
+    async fn handle_ssh_input(&mut self, data: Vec<u8>) -> Result<()> {
+        let (forward, switch) = split_ssh_input(&data, SWITCH_SEQ);
+        if !forward.is_empty()
+            && let Some(session) = self.active_session.as_mut()
+        {
+            session.write_input(&forward).await?;
+        }
+        if switch {
+            self.trigger_ssh_to_sftp = true;
         }
         Ok(())
     }
+
+    async fn handle_ssh_channel_msg(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        msg: Option<ChannelMsg>,
+    ) -> Result<()> {
+        match msg {
+            Some(ChannelMsg::Data { ref data }) => {
+                let mut stdout = tokio::io::stdout();
+                stdout.write_all(data).await?;
+                stdout.flush().await?;
+            }
+            Some(ChannelMsg::ExtendedData { ref data, .. }) => {
+                let mut stderr = tokio::io::stderr();
+                stderr.write_all(data).await?;
+                stderr.flush().await?;
+            }
+            Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => {
+                self.leave_ssh_mode(terminal).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn leave_ssh_mode(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+        terminal.clear()?;
+        self.ssh_last_size = None;
+        if let Some(session) = self.active_session.take() {
+            let _ = session.disconnect().await;
+        }
+        self.sftp_client = None;
+        self.sftp_pane = None;
+        self.current_host_alias = None;
+        self.mode = AppMode::Main;
+        Ok(())
+    }
+
+    async fn sync_ssh_size(&mut self) -> Result<()> {
+        let Some(session) = self.active_session.as_mut() else {
+            return Ok(());
+        };
+        if !session.has_pty() {
+            return Ok(());
+        }
+        let size = crossterm::terminal::size().unwrap_or((80, 24));
+        if self.ssh_last_size != Some(size) {
+            session.resize_pty(size.0, size.1).await?;
+            self.ssh_last_size = Some(size);
+        }
+        Ok(())
+    }
+
+    fn render(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+        if self.mode == AppMode::Ssh {
+            return Ok(());
+        }
+
+        let mut list_state = std::mem::take(&mut self.list_state);
+        terminal.draw(|f| match self.mode {
+            AppMode::Main => {
+                main_view::render(f, self, &mut list_state);
+                if let Some(pwd) = &self.pwd_dialog {
+                    pwd.dialog.render(f);
+                }
+            }
+            AppMode::Sftp => {
+                if let Some(pane) = &mut self.sftp_pane {
+                    let alias = self.current_host_alias.as_deref().unwrap_or("");
+                    let transfer_info =
+                        self.active_transfer.as_ref().map(|t| (t.verb, &t.progress));
+                    sftp_view::render(f, alias, pane, transfer_info);
+                }
+                if let Some(pwd) = &self.pwd_dialog {
+                    pwd.dialog.render(f);
+                }
+            }
+            AppMode::Ssh => {}
+        })?;
+        self.list_state = list_state;
+        Ok(())
+    }
+}
+
+const SWITCH_SEQ: &[u8] = b"\x1c";
+
+fn is_switch_key(k: KeyEvent) -> bool {
+    matches!(
+        (k.code, k.modifiers),
+        (KeyCode::Char('\\'), KeyModifiers::CONTROL)
+    )
+}
+
+fn split_ssh_input(data: &[u8], switch_seq: &[u8]) -> (Vec<u8>, bool) {
+    if switch_seq.is_empty() {
+        return (data.to_vec(), false);
+    }
+
+    if let Some(pos) = data
+        .windows(switch_seq.len())
+        .position(|window| window == switch_seq)
+    {
+        (data[..pos].to_vec(), true)
+    } else {
+        (data.to_vec(), false)
+    }
+}
+
+fn decode_tui_keys(data: &[u8]) -> Vec<KeyEvent> {
+    let mut keys = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        if let Some((key, consumed)) = decode_escape_key(&data[i..]) {
+            keys.push(key);
+            i += consumed;
+            continue;
+        }
+
+        let byte = data[i];
+        match byte {
+            b'\r' | b'\n' => {
+                keys.push(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                i += 1;
+            }
+            b'\t' => {
+                keys.push(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                i += 1;
+            }
+            0x03 => {
+                keys.push(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+                i += 1;
+            }
+            0x1c => {
+                keys.push(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+                i += 1;
+            }
+            0x08 | 0x7f => {
+                keys.push(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                i += 1;
+            }
+            0x01..=0x1a => {
+                let ch = ((byte - 1) + b'a') as char;
+                keys.push(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
+                i += 1;
+            }
+            0x1b => {
+                keys.push(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                i += 1;
+            }
+            _ if byte.is_ascii() => {
+                keys.push(KeyEvent::new(
+                    KeyCode::Char(byte as char),
+                    KeyModifiers::NONE,
+                ));
+                i += 1;
+            }
+            _ => {
+                let width = utf8_char_width(byte).min(data.len() - i);
+                if let Ok(text) = std::str::from_utf8(&data[i..i + width])
+                    && let Some(ch) = text.chars().next()
+                {
+                    keys.push(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+                    i += ch.len_utf8();
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    keys
+}
+
+fn decode_escape_key(data: &[u8]) -> Option<(KeyEvent, usize)> {
+    let patterns = [
+        (b"\x1b[A".as_slice(), KeyCode::Up),
+        (b"\x1b[B".as_slice(), KeyCode::Down),
+        (b"\x1b[C".as_slice(), KeyCode::Right),
+        (b"\x1b[D".as_slice(), KeyCode::Left),
+        (b"\x1b[H".as_slice(), KeyCode::Home),
+        (b"\x1b[F".as_slice(), KeyCode::End),
+        (b"\x1b[3~".as_slice(), KeyCode::Delete),
+    ];
+
+    patterns.iter().find_map(|(pattern, code)| {
+        data.starts_with(pattern)
+            .then(|| (KeyEvent::new(*code, KeyModifiers::NONE), pattern.len()))
+    })
+}
+
+fn utf8_char_width(byte: u8) -> usize {
+    match byte {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => 1,
+    }
+}
+
+fn expand_tilde(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    p.to_path_buf()
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -788,12 +1122,14 @@ mod tests {
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
             trigger_ssh_resume: false,
+            trigger_ssh_to_sftp: false,
             active_session: None,
             sftp_client: None,
             sftp_pane: None,
             current_host_alias: None,
             active_transfer: None,
             last_ctrl_c: None,
+            ssh_last_size: None,
             pwd_dialog: None,
         }
     }
@@ -827,5 +1163,19 @@ mod tests {
         let mut app = app_with(vec![mk("a"), mk("b"), mk("c")]);
         app.apply_search();
         assert_eq!(app.filtered_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn decode_switch_key_from_raw_input() {
+        let keys = decode_tui_keys(b"\x1c");
+        assert_eq!(keys.len(), 1);
+        assert!(is_switch_key(keys[0]));
+    }
+
+    #[test]
+    fn split_ssh_input_stops_before_switch_key() {
+        let (forward, switched) = split_ssh_input(b"ls\x1c", SWITCH_SEQ);
+        assert_eq!(forward, b"ls");
+        assert!(switched);
     }
 }

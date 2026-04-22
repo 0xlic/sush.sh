@@ -1,12 +1,8 @@
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use russh::client::{self, Handle, Msg};
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::{Channel, ChannelMsg, Disconnect};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use std::sync::Arc;
 
 pub struct ClientHandler;
 
@@ -67,69 +63,25 @@ impl ActiveSession {
         Ok(())
     }
 
-    /// I/O 接管循环：stdin → 远程 PTY，远程输出 → stdout。
-    /// 检测到 `switch_seq`（Shift+Tab = \x1b[Z）时返回 Ok(true)。
-    /// 远程关闭/exit 时返回 Ok(false)。
-    pub async fn takeover(&mut self, switch_seq: &[u8]) -> Result<bool> {
+    pub fn has_pty(&self) -> bool {
+        self.channel.is_some()
+    }
+
+    pub async fn write_input(&mut self, data: &[u8]) -> Result<()> {
         let ch = self.channel.as_mut().context("PTY 未建立")?;
+        ch.data(data).await?;
+        Ok(())
+    }
 
-        // 用 spawn_blocking 阻塞读 stdin，通过 mpsc 向事件循环投递
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(32);
-        tokio::task::spawn_blocking(move || {
-            use std::io::Read;
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 4096];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+    pub async fn resize_pty(&mut self, cols: u16, rows: u16) -> Result<()> {
+        let ch = self.channel.as_mut().context("PTY 未建立")?;
+        ch.window_change(cols as u32, rows as u32, 0, 0).await?;
+        Ok(())
+    }
 
-        let mut size_ticker = tokio::time::interval(Duration::from_millis(500));
-        let mut last_size = crossterm::terminal::size().unwrap_or((80, 24));
-
-        loop {
-            tokio::select! {
-                Some(data) = stdin_rx.recv() => {
-                    if data.windows(switch_seq.len()).any(|w| w == switch_seq) {
-                        return Ok(true);
-                    }
-                    ch.data(data.as_slice()).await?;
-                }
-                msg = ch.wait() => {
-                    match msg {
-                        Some(ChannelMsg::Data { ref data }) => {
-                            let mut stdout = tokio::io::stdout();
-                            stdout.write_all(data).await?;
-                            stdout.flush().await?;
-                        }
-                        Some(ChannelMsg::ExtendedData { ref data, .. }) => {
-                            let mut stderr = tokio::io::stderr();
-                            stderr.write_all(data).await?;
-                            stderr.flush().await?;
-                        }
-                        Some(ChannelMsg::ExitStatus { .. })
-                        | Some(ChannelMsg::Eof)
-                        | None => break,
-                        _ => {}
-                    }
-                }
-                _ = size_ticker.tick() => {
-                    let now = crossterm::terminal::size().unwrap_or(last_size);
-                    if now != last_size {
-                        ch.window_change(now.0 as u32, now.1 as u32, 0, 0).await?;
-                        last_size = now;
-                    }
-                }
-            }
-        }
-        Ok(false)
+    pub async fn wait_channel_msg(&mut self) -> Result<Option<ChannelMsg>> {
+        let ch = self.channel.as_mut().context("PTY 未建立")?;
+        Ok(ch.wait().await)
     }
 
     pub async fn disconnect(self) -> Result<()> {
