@@ -18,6 +18,7 @@
 | 错误处理 | anyhow | 1.0 | MVP 阶段简化错误处理 |
 | 跨平台路径 | dirs | 6.0 | XDG 规范目录 |
 | 主机 ID | uuid | 1.23 | 预留依赖，当前实现未使用 |
+| 终端模拟器 | alacritty_terminal | — | VT100/xterm 状态机，SSH 嵌入式终端渲染（v0.2 引入）|
 
 ### 关于 russh + russh-sftp 的风险说明
 
@@ -41,6 +42,7 @@
 │           │ TUI Layer │ (ratatui + crossterm)       │
 │           ├──────────┤                              │
 │           │ 主界面    │ 搜索框 + 主机列表 + 快捷键栏   │
+│           │ SSH 终端  │ 嵌入式终端 widget + 状态栏     │
 │           │ SFTP 面板 │ 单面板浏览器 + 进度条          │
 │           └────┬─────┘                              │
 │                │ 事件                                │
@@ -79,7 +81,8 @@ src/
 ├── ssh/
 │   ├── mod.rs           # SSH 模块入口
 │   ├── session.rs       # russh 会话管理
-│   └── auth.rs          # 认证策略（agent → key → password）
+│   ├── auth.rs          # 认证策略（agent → key → password）
+│   └── terminal.rs      # alacritty_terminal 封装，维护虚拟屏幕状态
 ├── sftp/
 │   ├── mod.rs           # SFTP 模块入口
 │   ├── client.rs        # SFTP 操作封装
@@ -89,6 +92,7 @@ src/
 │   ├── event.rs         # 事件循环（键盘 + 异步事件合并）
 │   ├── views/
 │   │   ├── main_view.rs     # 主界面（搜索 + 列表）
+│   │   ├── ssh_view.rs      # SSH 终端视图（包含 TerminalView widget）
 │   │   ├── sftp_view.rs     # SFTP 文件浏览器
 │   │   └── password_dialog.rs  # 密码输入弹窗
 │   └── widgets/
@@ -254,36 +258,45 @@ enum AppEvent {
 - `Tick`：固定间隔轮询，用于处理终端 resize、传输状态收尾和其他周期性逻辑
 - SSH channel 消息不经过 `AppEvent`，而是在 SSH 模式下由 `tokio::select!` 与 `EventBus` 并行等待
 
-## SSH 接管模式 — 前缀键实现细节
+## SSH 嵌入式终端模式（v0.2）
 
-进入 SSH 模式时：
+v0.2 起，SSH 模式从接管模式切换为**嵌入式终端模拟器模式**：TUI 始终处于 alternate screen，远程 PTY 输出由 `alacritty_terminal` 维护虚拟屏幕状态，再由 `TerminalView` widget 渲染到 ratatui 画布。
 
-1. 终端切换到 raw mode（crossterm 已处理）
-2. sush 读取 stdin 字节流：
-   - 检测到 `Ctrl-\`（字节 `0x1c`）→ 触发模式切换
-   - 其他所有字节 → 原样转发给远程 PTY
-3. 远程 PTY 输出 → 原样写入 stdout/stderr
+**架构变化**：
 
-**退出 SSH 模式时**：恢复终端设置。
+- 不再执行 `LeaveAlternateScreen` / `EnterAlternateScreen`，TUI 全程运行
+- SSH 输出字节流喂给 `alacritty_terminal::Term`，由其维护 cell 网格（字符、颜色、属性）
+- `TerminalView` widget 将 `Term::grid()` 映射到 ratatui `Cell`，随每帧渲染
+- 状态栏在 SSH 模式下持续可见，显示主机名与快捷键提示
+- `Ctrl-\`（字节 `0x1c`）仍作为前缀键，在 TUI 事件层处理，不透传给远程
 
-**Ctrl-\ 的字节表示**：在当前实现中，切换键使用 `0x1c`。SSH 模式直接检测原始字节流，SFTP/主界面通过 TUI 按键解码识别 `Ctrl-\`。
+**终端 resize**：ratatui 分配给 `TerminalView` 的区域发生变化时，同步调用 `Term::resize()` 与 `session.resize_pty()`。
+
+**颜色映射**：`alacritty_terminal` 的 `Color::Named` → ratatui named colors，`Color::Indexed(n)` → ratatui `Color::Indexed(n)`，`Color::Rgb(r,g,b)` → ratatui `Color::Rgb(r,g,b)`。
 
 ## 数据流
 
 ### SSH 模式
 
 ```
-键盘 stdin
+键盘 stdin (raw bytes)
   │
   ▼
-sush I/O 转发层 ──(检测前缀键)──→ 切换到 SFTP
-  │
-  │ (透传)
-  ▼
-russh channel.data() ──→ 远程 PTY
-  │
-  ▼ (远程输出)
-russh channel.on_data() ──→ stdout/stderr
+EventBus → handle_ssh_input()
+  ├── Ctrl-\ 前缀键 ──→ 切换到 SFTP（TUI 内部处理）
+  └── 其他字节 ──→ russh channel.data() ──→ 远程 PTY
+                                               │
+                                               ▼ (远程 PTY 输出)
+                                    russh ChannelMsg::Data
+                                               │
+                                               ▼
+                               TerminalEmulator.process(bytes)
+                               （alacritty_terminal::Term 更新 cell 网格）
+                                               │
+                                               ▼
+                                     ratatui 渲染帧
+                               └── TerminalView widget
+                                     读取 Term::grid() → 渲染 cell
 ```
 
 ### SFTP 模式

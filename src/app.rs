@@ -8,7 +8,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use russh::ChannelMsg;
-use tokio::io::AsyncWriteExt;
 
 use crate::config::host::Host;
 use crate::config::{ssh_config, store};
@@ -17,8 +16,9 @@ use crate::sftp::transfer::{TransferProgress, TransferState, download, upload};
 use crate::sftp::{PaneSide, SftpPaneState};
 use crate::ssh::auth;
 use crate::ssh::session::{ActiveSession, try_key_auth};
+use crate::ssh::terminal::TerminalEmulator;
 use crate::tui::event::{AppEvent, EventBus};
-use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view};
+use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view, ssh_view};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainFocus {
@@ -29,7 +29,6 @@ pub enum MainFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Main,
-    #[allow(dead_code)]
     Ssh,
     Sftp,
 }
@@ -85,6 +84,7 @@ pub struct App {
     pub active_transfer: Option<ActiveTransfer>,
     pub last_ctrl_c: Option<Instant>,
     pub ssh_last_size: Option<(u16, u16)>,
+    pub terminal_emulator: Option<TerminalEmulator>,
     pwd_dialog: Option<PwdDialog>,
 }
 
@@ -131,6 +131,7 @@ impl App {
             active_transfer: None,
             last_ctrl_c: None,
             ssh_last_size: None,
+            terminal_emulator: None,
             pwd_dialog: None,
         })
     }
@@ -720,9 +721,11 @@ impl App {
     ) -> Result<()> {
         let mut session = self.connect_with_prompt(terminal, bus, host).await?;
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        session.request_pty(cols, rows).await?;
+        // Reserve 1 row for the status bar.
+        let term_rows = rows.saturating_sub(3).max(1);
+        session.request_pty(cols, term_rows).await?;
 
-        crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
+        self.terminal_emulator = Some(TerminalEmulator::new(cols, term_rows));
         self.active_session = Some(session);
         self.current_host_alias = Some(host.alias.clone());
         self.mode = AppMode::Ssh;
@@ -833,7 +836,6 @@ impl App {
             self.sftp_pane = Some(pane);
         }
 
-        crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
         terminal.clear()?;
         self.mode = AppMode::Sftp;
         Ok(())
@@ -847,11 +849,12 @@ impl App {
 
         if !session.has_pty() {
             let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-            session.request_pty(cols, rows).await?;
+            let term_rows = rows.saturating_sub(3).max(1);
+            session.request_pty(cols, term_rows).await?;
+            self.terminal_emulator = Some(TerminalEmulator::new(cols, term_rows));
             self.ssh_last_size = Some((cols, rows));
         }
 
-        crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
         self.mode = AppMode::Ssh;
         Ok(())
     }
@@ -876,14 +879,14 @@ impl App {
     ) -> Result<()> {
         match msg {
             Some(ChannelMsg::Data { ref data }) => {
-                let mut stdout = tokio::io::stdout();
-                stdout.write_all(data).await?;
-                stdout.flush().await?;
+                if let Some(emulator) = &mut self.terminal_emulator {
+                    emulator.process(data);
+                }
             }
             Some(ChannelMsg::ExtendedData { ref data, .. }) => {
-                let mut stderr = tokio::io::stderr();
-                stderr.write_all(data).await?;
-                stderr.flush().await?;
+                if let Some(emulator) = &mut self.terminal_emulator {
+                    emulator.process(data);
+                }
             }
             Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => {
                 self.leave_ssh_mode(terminal).await?;
@@ -897,9 +900,9 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
-        crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
         terminal.clear()?;
         self.ssh_last_size = None;
+        self.terminal_emulator = None;
         if let Some(session) = self.active_session.take() {
             let _ = session.disconnect().await;
         }
@@ -919,17 +922,17 @@ impl App {
         }
         let size = crossterm::terminal::size().unwrap_or((80, 24));
         if self.ssh_last_size != Some(size) {
-            session.resize_pty(size.0, size.1).await?;
+            let term_rows = size.1.saturating_sub(3).max(1);
+            session.resize_pty(size.0, term_rows).await?;
+            if let Some(emulator) = &mut self.terminal_emulator {
+                emulator.resize(size.0, term_rows);
+            }
             self.ssh_last_size = Some(size);
         }
         Ok(())
     }
 
     fn render(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-        if self.mode == AppMode::Ssh {
-            return Ok(());
-        }
-
         let mut list_state = std::mem::take(&mut self.list_state);
         terminal.draw(|f| match self.mode {
             AppMode::Main => {
@@ -949,7 +952,12 @@ impl App {
                     pwd.dialog.render(f);
                 }
             }
-            AppMode::Ssh => {}
+            AppMode::Ssh => {
+                if let Some(emulator) = &self.terminal_emulator {
+                    let alias = self.current_host_alias.as_deref().unwrap_or("");
+                    ssh_view::render(f, alias, emulator);
+                }
+            }
         })?;
         self.list_state = list_state;
         Ok(())
@@ -1130,6 +1138,7 @@ mod tests {
             active_transfer: None,
             last_ctrl_c: None,
             ssh_last_size: None,
+            terminal_emulator: None,
             pwd_dialog: None,
         }
     }
