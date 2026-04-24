@@ -10,7 +10,7 @@ use ratatui::widgets::ListState;
 use russh::ChannelMsg;
 
 use crate::config::host::Host;
-use crate::config::{ssh_config, store};
+use crate::config::store;
 use crate::sftp::client::{SftpClient, list_local};
 use crate::sftp::transfer::{TransferProgress, TransferState, download, upload};
 use crate::sftp::{PaneSide, SftpPaneState};
@@ -18,7 +18,10 @@ use crate::ssh::auth;
 use crate::ssh::session::{ActiveSession, try_key_auth};
 use crate::ssh::terminal::TerminalEmulator;
 use crate::tui::event::{AppEvent, EventBus};
+use crate::tui::views::edit_view::{self, EditDraft, EditField};
+use crate::tui::views::import_view::{self, ImportViewState};
 use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view, ssh_view};
+use crate::tui::widgets::confirm_dialog::ConfirmDialog;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainFocus {
@@ -31,6 +34,8 @@ pub enum AppMode {
     Main,
     Ssh,
     Sftp,
+    Edit,
+    ImportSshConfig,
 }
 
 struct PwdDialog {
@@ -85,23 +90,19 @@ pub struct App {
     pub last_ctrl_c: Option<Instant>,
     pub ssh_last_size: Option<(u16, u16)>,
     pub terminal_emulator: Option<TerminalEmulator>,
+    pub edit_draft: Option<EditDraft>,
+    pub import_state: Option<ImportViewState>,
+    pub confirm_delete: bool,
+    pub import_prompted: bool,
+    pub show_import_prompt: bool,
     pwd_dialog: Option<PwdDialog>,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
-        let (existing, prev_hash) = store::load_from(&store::config_path())?;
-        let (imported, new_hash) = ssh_config::import_ssh_config()?;
-
-        let hosts = if !new_hash.is_empty() && new_hash != prev_hash {
-            let merged = store::merge_ssh_config_hosts(existing, imported);
-            // import_prompted=false here is safe: Task 6 rewrites App::new() entirely
-            // to use load_store() and thread the actual value through.
-            store::save_to(&store::config_path(), &merged, &new_hash, false)?;
-            merged
-        } else {
-            existing
-        };
+        let store = store::load_store(&store::config_path())?;
+        let hosts = store.hosts;
+        let import_prompted = store.metadata.import_prompted;
 
         let filtered_indices: Vec<usize> = (0..hosts.len()).collect();
         let mut list_state = ListState::default();
@@ -134,6 +135,11 @@ impl App {
             last_ctrl_c: None,
             ssh_last_size: None,
             terminal_emulator: None,
+            edit_draft: None,
+            import_state: None,
+            confirm_delete: false,
+            import_prompted,
+            show_import_prompt: false,
             pwd_dialog: None,
         })
     }
@@ -348,6 +354,18 @@ impl App {
                 Ok(())
             }
             AppMode::Ssh => self.handle_ssh_input(data).await,
+            AppMode::Edit => {
+                for key in decode_tui_keys(&data) {
+                    self.handle_edit_input(key);
+                }
+                Ok(())
+            }
+            AppMode::ImportSshConfig => {
+                for key in decode_tui_keys(&data) {
+                    self.handle_import_input(key);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -356,10 +374,18 @@ impl App {
             self.handle_pwd_key(k);
             return;
         }
+        if self.confirm_delete {
+            self.handle_confirm_delete(k);
+            return;
+        }
+        if self.show_import_prompt {
+            self.handle_import_prompt_key(k);
+            return;
+        }
         match self.mode {
             AppMode::Main => self.handle_main_key(k),
             AppMode::Sftp => self.handle_sftp_key(k),
-            AppMode::Ssh => {}
+            AppMode::Ssh | AppMode::Edit | AppMode::ImportSshConfig => {}
         }
     }
 
@@ -411,7 +437,25 @@ impl App {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
-            // n/e/d/? are not implemented yet.
+            (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                self.edit_draft = Some(EditDraft::new_host());
+                self.mode = AppMode::Edit;
+            }
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                if let Some(&idx) = self
+                    .filtered_indices
+                    .get(self.list_state.selected().unwrap_or(0))
+                {
+                    self.edit_draft = Some(EditDraft::from_host(&self.hosts[idx]));
+                    self.mode = AppMode::Edit;
+                }
+            }
+            (KeyCode::Char('d'), KeyModifiers::NONE) if !self.filtered_indices.is_empty() => {
+                self.confirm_delete = true;
+            }
+            (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                self.open_import_view();
+            }
             _ => {}
         }
     }
@@ -514,6 +558,212 @@ impl App {
             Some(0)
         };
         self.list_state.select(sel);
+    }
+
+    fn open_import_view(&mut self) {
+        let ssh_hosts = crate::config::ssh_config::import_ssh_config()
+            .map(|(h, _)| h)
+            .unwrap_or_default();
+        if ssh_hosts.is_empty() {
+            return;
+        }
+        self.import_state = Some(ImportViewState::new(ssh_hosts, &self.hosts));
+        self.mode = AppMode::ImportSshConfig;
+    }
+
+    fn save_hosts_to_disk(&self) {
+        let _ = store::save_to(&store::config_path(), &self.hosts, "", self.import_prompted);
+    }
+
+    fn handle_edit_input(&mut self, k: KeyEvent) {
+        let Some(draft) = self.edit_draft.as_mut() else {
+            return;
+        };
+
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => {
+                self.edit_draft = None;
+                self.mode = AppMode::Main;
+                return;
+            }
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                self.try_save_edit();
+                return;
+            }
+            (KeyCode::Tab, _) | (KeyCode::Down, _) => {
+                if draft.focused_field == EditField::Tags {
+                    if !draft.tags.candidates.is_empty() {
+                        draft.tags.handle_down();
+                        return;
+                    }
+                    draft.tags.commit_pending();
+                }
+                draft.focused_field = draft.focused_field.next();
+                return;
+            }
+            (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
+                if draft.focused_field == EditField::Tags {
+                    if !draft.tags.candidates.is_empty() {
+                        draft.tags.handle_up();
+                        return;
+                    }
+                    draft.tags.commit_pending();
+                }
+                draft.focused_field = draft.focused_field.prev();
+                return;
+            }
+            _ => {}
+        }
+
+        if draft.focused_field == EditField::Tags {
+            let all_tags: Vec<String> = {
+                let mut t: Vec<String> = self
+                    .hosts
+                    .iter()
+                    .flat_map(|h| h.tags.iter().cloned())
+                    .collect();
+                t.sort();
+                t.dedup();
+                t
+            };
+            let draft = self.edit_draft.as_mut().unwrap();
+            match (k.code, k.modifiers) {
+                (KeyCode::Left, _) => draft.tags.handle_left(),
+                (KeyCode::Right, _) => draft.tags.handle_right(),
+                (KeyCode::Backspace, _) => draft.tags.handle_backspace(&all_tags),
+                (KeyCode::Enter, _) | (KeyCode::Tab, _) => draft.tags.confirm_input(),
+                (KeyCode::Esc, _) => draft.tags.cancel_input(),
+                (KeyCode::Char(c), KeyModifiers::NONE)
+                | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                    draft.tags.handle_char(c, &all_tags);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        let draft = self.edit_draft.as_mut().unwrap();
+        // Text field handling
+        match k.code {
+            KeyCode::Backspace => {
+                if let Some(v) = draft.active_text_mut() {
+                    v.pop();
+                }
+            }
+            KeyCode::Char(c)
+                if k.modifiers == KeyModifiers::NONE || k.modifiers == KeyModifiers::SHIFT =>
+            {
+                if draft.focused_field == EditField::Port && !c.is_ascii_digit() {
+                    return;
+                }
+                if let Some(v) = draft.active_text_mut() {
+                    v.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn try_save_edit(&mut self) {
+        let Some(draft) = self.edit_draft.as_mut() else {
+            return;
+        };
+        draft.error = None;
+
+        if draft.is_new {
+            let alias = draft.alias.trim().to_string();
+            if self.hosts.iter().any(|h| h.alias == alias) {
+                draft.error = Some("Alias already exists".into());
+                return;
+            }
+        }
+
+        match edit_view::validate(draft) {
+            Err(e) => {
+                draft.error = Some(e);
+            }
+            Ok(()) => {
+                let host = edit_view::build_host(draft);
+                if draft.is_new {
+                    self.hosts.push(host);
+                } else {
+                    let id = draft.original_id.clone().unwrap_or_default();
+                    if let Some(h) = self.hosts.iter_mut().find(|h| h.id == id) {
+                        *h = host;
+                    }
+                }
+                self.apply_search();
+                self.save_hosts_to_disk();
+                self.edit_draft = None;
+                self.mode = AppMode::Main;
+            }
+        }
+    }
+
+    fn handle_confirm_delete(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.confirm_delete = false;
+                if let Some(&idx) = self
+                    .filtered_indices
+                    .get(self.list_state.selected().unwrap_or(0))
+                {
+                    let id = self.hosts[idx].id.clone();
+                    self.hosts.retain(|h| h.id != id);
+                    self.apply_search();
+                    self.save_hosts_to_disk();
+                }
+            }
+            _ => {
+                self.confirm_delete = false;
+            }
+        }
+    }
+
+    fn handle_import_prompt_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.show_import_prompt = false;
+                self.open_import_view();
+            }
+            _ => {
+                self.show_import_prompt = false;
+                self.import_prompted = true;
+                self.save_hosts_to_disk();
+            }
+        }
+    }
+
+    fn handle_import_input(&mut self, k: KeyEvent) {
+        let Some(state) = self.import_state.as_mut() else {
+            return;
+        };
+        match k.code {
+            KeyCode::Esc => {
+                self.import_state = None;
+                self.import_prompted = true;
+                self.mode = AppMode::Main;
+                self.save_hosts_to_disk();
+            }
+            KeyCode::Enter => {
+                let selected = state.selected_hosts();
+                for h in selected {
+                    if !self.hosts.iter().any(|e| e.id == h.id) {
+                        self.hosts.push(h);
+                    }
+                }
+                self.apply_search();
+                self.import_prompted = true;
+                self.save_hosts_to_disk();
+                self.import_state = None;
+                self.mode = AppMode::Main;
+            }
+            KeyCode::Char(' ') => state.toggle_selected(),
+            KeyCode::Char('a') => state.toggle_all(),
+            KeyCode::Up => state.move_up(),
+            KeyCode::Down => state.move_down(),
+            _ => {}
+        }
     }
 
     fn select_next(&mut self) {
@@ -942,6 +1192,25 @@ impl App {
                 if let Some(pwd) = &self.pwd_dialog {
                     pwd.dialog.render(f);
                 }
+                if self.confirm_delete
+                    && let Some(&idx) = self
+                        .filtered_indices
+                        .get(list_state.selected().unwrap_or(0))
+                {
+                    let alias = self.hosts[idx].alias.clone();
+                    ConfirmDialog::new(
+                        "Delete Host",
+                        &format!("Delete \"{alias}\"? (sush config only)"),
+                    )
+                    .render(f);
+                }
+                if self.show_import_prompt {
+                    ConfirmDialog::new(
+                        "Import SSH Config",
+                        "Found hosts in ~/.ssh/config. Import them?",
+                    )
+                    .render(f);
+                }
             }
             AppMode::Sftp => {
                 if let Some(pane) = &mut self.sftp_pane {
@@ -958,6 +1227,26 @@ impl App {
                 if let Some(emulator) = &self.terminal_emulator {
                     let alias = self.current_host_alias.as_deref().unwrap_or("");
                     ssh_view::render(f, alias, emulator);
+                }
+            }
+            AppMode::Edit => {
+                if let Some(draft) = &self.edit_draft {
+                    let all_tags: Vec<String> = {
+                        let mut t: Vec<String> = self
+                            .hosts
+                            .iter()
+                            .flat_map(|h| h.tags.iter().cloned())
+                            .collect();
+                        t.sort();
+                        t.dedup();
+                        t
+                    };
+                    edit_view::render(f, draft, &all_tags);
+                }
+            }
+            AppMode::ImportSshConfig => {
+                if let Some(state) = &self.import_state {
+                    import_view::render(f, state);
                 }
             }
         })?;
@@ -1141,6 +1430,11 @@ mod tests {
             last_ctrl_c: None,
             ssh_last_size: None,
             terminal_emulator: None,
+            edit_draft: None,
+            import_state: None,
+            confirm_delete: false,
+            import_prompted: false,
+            show_import_prompt: false,
             pwd_dialog: None,
         }
     }

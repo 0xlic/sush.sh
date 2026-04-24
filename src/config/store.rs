@@ -83,6 +83,7 @@ pub fn save_to(
 /// - Existing hosts from sush (any source) stay unchanged
 /// - Hosts present only in SSH config are imported as new entries
 /// - Hosts removed from SSH config are not removed from sush
+#[allow(dead_code)]
 pub fn merge_ssh_config_hosts(existing: Vec<Host>, imported: Vec<Host>) -> Vec<Host> {
     let mut result = existing;
     for new_h in imported {
