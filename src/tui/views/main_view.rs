@@ -47,7 +47,8 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
             ("n", "New"),
             ("e", "Edit"),
             ("d", "Delete"),
-            ("?", "Help"),
+            ("i", "Import"),
+            ("q", "Quit"),
         ]
     };
 
