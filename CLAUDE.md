@@ -26,43 +26,7 @@
 - `ARCHITECTURE.md` — 技术栈、模块设计、数据流
 - `ROADMAP.md` — 版本规划
 
-### 技术选型（已锁定）
-
-- SSH：russh 0.60（纯 Rust，无 C 依赖）
-- SFTP：russh-sftp 2.1
-- TUI：ratatui 0.30 + crossterm 0.29
-- 异步：tokio 1.52
-- 模糊搜索：nucleo 0.5
-- 终端模拟器：alacritty_terminal（v0.2 引入，VT100/xterm 状态机）
-- 错误处理：anyhow 1.0（MVP 阶段）
-- 配置格式：TOML
-
-不要引入未在 `Cargo.toml` 中声明的新依赖，除非先讨论。
-
-### 模块边界
-
-```
-src/
-├── app.rs           # 状态机，模式切换逻辑
-├── config/          # 主机配置、SSH Config 导入、TOML 持久化
-├── ssh/             # SSH 连接、认证、会话管理、终端模拟器封装
-├── sftp/            # SFTP 操作、文件传输
-├── tui/             # UI 渲染、事件循环、视图、组件
-│   ├── views/       # 完整页面视图（主界面、SSH 终端、SFTP 浏览器）
-│   └── widgets/     # 可复用 UI 组件（搜索框、列表、进度条、状态栏）
-└── utils/           # 工具函数（模糊搜索等）
-```
-
-新功能放入对应模块，不要在 `main.rs` 堆逻辑。
-
-### 关键设计决策
-
-- SSH 使用**嵌入式终端模式**（alacritty_terminal + ratatui widget），TUI 界面在 SSH 连接期间始终可见
-- 前缀键是 `Ctrl-\`（raw mode 下字节 `0x1c`），用于 SSH ↔ SFTP 切换
-- SSH 和 SFTP **共享同一 TCP 连接**（不同 channel）
-- SFTP 是**单面板**，Tab 切换本地/远程
-- 双 `Ctrl-C` 仅在 SFTP/主界面生效，SSH 模式下 Ctrl-C 透传给远程
-- 标签系统是**扁平标签**，没有分组层级
+每个新版本验收无误之后，需要更新上述文档及中英文README文档，以及打上git tag版本号
 
 ## 代码规范
 
