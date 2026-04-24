@@ -10,6 +10,7 @@ pub struct HostList<'a> {
     pub hosts: &'a [Host],
     pub indices: &'a [usize],
     pub focused: bool,
+    pub probe: Option<Option<bool>>, // None=no dot, Some(None)=gray, Some(Some(bool))=colored
 }
 
 impl<'a> StatefulWidget for HostList<'a> {
@@ -26,7 +27,6 @@ impl<'a> StatefulWidget for HostList<'a> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        // Split the inner area into one header row, the list, and one description row.
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -36,31 +36,25 @@ impl<'a> StatefulWidget for HostList<'a> {
             ])
             .split(inner);
 
-        // Header aligned with the data columns: 2 spaces + alias 16 + hostname 20 + tags.
+        // Header — 4-space indent to align with indicator column.
         let header = Line::from(vec![
-            Span::raw("  "),
+            Span::raw("    "),
             Span::styled(
                 format!("{:<16}", "Alias"),
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{:<20}", "Address"),
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Tags",
-                Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
             ),
         ]);
         Paragraph::new(header).render(sections[0], buf);
 
-        // Description row for the currently selected host.
+        // Description row for selected host.
         let desc = state
             .selected()
             .and_then(|sel| self.indices.get(sel))
@@ -76,30 +70,43 @@ impl<'a> StatefulWidget for HostList<'a> {
         };
         Paragraph::new(desc_spans).render(sections[2], buf);
 
-        // Data list.
+        let selected_pos = state.selected();
         let items: Vec<ListItem> = self
             .indices
             .iter()
-            .map(|&i| {
-                let h = &self.hosts[i];
+            .enumerate()
+            .map(|(list_pos, &host_idx)| {
+                let h = &self.hosts[host_idx];
+                let is_selected = selected_pos == Some(list_pos);
+
+                let indicator: Span = if is_selected {
+                    match self.probe {
+                        None => Span::raw("    "),
+                        Some(None) => Span::styled("  ● ", Style::default().fg(Color::DarkGray)),
+                        Some(Some(true)) => Span::styled("  ● ", Style::default().fg(Color::Green)),
+                        Some(Some(false)) => Span::styled("  ● ", Style::default().fg(Color::Red)),
+                    }
+                } else {
+                    Span::raw("    ")
+                };
+
                 let tags = h.tags.join(",");
                 ListItem::new(Line::from(vec![
-                    Span::raw("  "),
+                    indicator,
                     Span::styled(format!("{:<16}", h.alias), Style::default().fg(Color::Cyan)),
                     Span::raw(format!("{:<20}", h.hostname)),
                     Span::styled(tags, Style::default().fg(Color::Yellow)),
                 ]))
             })
             .collect();
+
         StatefulWidget::render(
-            List::new(items)
-                .highlight_style(
-                    Style::default()
-                        .add_modifier(Modifier::REVERSED)
-                        .fg(Color::Yellow),
-                )
-                .highlight_symbol("● "),
-            sections[1], // list area
+            List::new(items).highlight_style(
+                Style::default()
+                    .add_modifier(Modifier::REVERSED)
+                    .fg(Color::Yellow),
+            ),
+            sections[1],
             buf,
             state,
         );
@@ -144,6 +151,7 @@ mod tests {
                 hosts: &hosts,
                 indices: &indices,
                 focused: false,
+                probe: None,
             },
             area,
             &mut buf,

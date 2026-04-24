@@ -27,11 +27,20 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
         chunks[0],
     );
 
+    let probe: Option<Option<bool>> = if app.probe_result.is_some() {
+        Some(app.probe_result)
+    } else if app.probe_rx.is_some() {
+        Some(None)
+    } else {
+        None
+    };
+
     f.render_stateful_widget(
         HostList {
             hosts: &app.hosts,
             indices: &app.filtered_indices,
             focused: !search_focused,
+            probe,
         },
         chunks[1],
         list_state,
