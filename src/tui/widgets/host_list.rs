@@ -36,9 +36,9 @@ impl<'a> StatefulWidget for HostList<'a> {
             ])
             .split(inner);
 
-        // Header — 4-space indent to align with indicator column.
+        // Header — 2-space indent aligned with list items.
         let header = Line::from(vec![
-            Span::raw("    "),
+            Span::raw("  "),
             Span::styled(
                 format!("{:<16}", "Alias"),
                 Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
@@ -54,23 +54,31 @@ impl<'a> StatefulWidget for HostList<'a> {
         ]);
         Paragraph::new(header).render(sections[0], buf);
 
-        // Description row for selected host.
+        // Description row: dot color reflects probe state; dot always shows when probe active.
         let desc = state
             .selected()
             .and_then(|sel| self.indices.get(sel))
             .map(|&i| self.hosts[i].description.as_str())
             .unwrap_or("");
-        let desc_spans = if desc.is_empty() {
-            Line::from(vec![])
+        let dot_color = match self.probe {
+            Some(None) => Color::DarkGray,
+            Some(Some(true)) => Color::Green,
+            Some(Some(false)) => Color::Red,
+            None => Color::Yellow,
+        };
+        let show_dot = self.probe.is_some() || !desc.is_empty();
+        let desc_spans = if show_dot {
+            let mut spans = vec![Span::styled("  ● ", Style::default().fg(dot_color))];
+            if !desc.is_empty() {
+                spans.push(Span::raw(desc));
+            }
+            Line::from(spans)
         } else {
-            Line::from(vec![
-                Span::styled("  ● ", Style::default().fg(Color::Yellow)),
-                Span::raw(desc),
-            ])
+            Line::from(vec![])
         };
         Paragraph::new(desc_spans).render(sections[2], buf);
 
-        let selected_pos = state.selected();
+        let _selected_pos = state.selected();
         let items: Vec<ListItem> = self
             .indices
             .iter()
@@ -78,7 +86,7 @@ impl<'a> StatefulWidget for HostList<'a> {
                 let h = &self.hosts[host_idx];
                 let tags = h.tags.join(",");
                 ListItem::new(Line::from(vec![
-                    Span::raw("    "),
+                    Span::raw("  "),
                     Span::styled(format!("{:<16}", h.alias), Style::default().fg(Color::Cyan)),
                     Span::raw(format!("{:<20}", h.hostname)),
                     Span::styled(tags, Style::default().fg(Color::Yellow)),
@@ -97,27 +105,6 @@ impl<'a> StatefulWidget for HostList<'a> {
             state,
         );
 
-        // Draw probe dot directly to buffer after List renders, bypassing highlight_style color
-        // interference. The dot is written at the selected row's position in the list area.
-        if let (Some(sel), Some(dot_color)) = (
-            selected_pos,
-            match self.probe {
-                Some(None) => Some(Color::DarkGray),
-                Some(Some(true)) => Some(Color::Green),
-                Some(Some(false)) => Some(Color::Red),
-                None => None,
-            },
-        ) {
-            let y = sections[1].y + sel as u16;
-            let x = sections[1].x + 2; // 2-space indent before dot
-            if y < sections[1].bottom() && x < sections[1].right() {
-                let cell = &mut buf[(x, y)];
-                cell.set_symbol("●");
-                cell.set_fg(dot_color);
-                // Ensure the dot isn't reversed by the highlight style
-                cell.set_style(cell.style().remove_modifier(Modifier::REVERSED));
-            }
-        }
     }
 }
 
