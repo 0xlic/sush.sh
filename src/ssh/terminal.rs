@@ -1,8 +1,8 @@
+use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, RenderableContent};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
-use alacritty_terminal::Term;
 
 struct TermSize {
     cols: usize,
@@ -68,7 +68,6 @@ impl TerminalEmulator {
     pub fn renderable_content(&self) -> RenderableContent<'_> {
         self.term.renderable_content()
     }
-
 }
 
 #[cfg(test)]
@@ -87,11 +86,7 @@ mod tests {
         let mut em = TerminalEmulator::new(80, 24);
         em.process(b"hi");
         let content = em.renderable_content();
-        let chars: Vec<char> = content
-            .display_iter
-            .take(2)
-            .map(|ic| ic.cell.c)
-            .collect();
+        let chars: Vec<char> = content.display_iter.take(2).map(|ic| ic.cell.c).collect();
         assert_eq!(chars, vec!['h', 'i']);
     }
 

@@ -178,13 +178,14 @@ pub fn build_host(draft: &mut EditDraft) -> Host {
 
 #[allow(dead_code)]
 pub fn render(f: &mut Frame, draft: &EditDraft, all_tags: &[String]) {
-    let [form_area, status_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(f.area());
+    let [form_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
 
-    let title = if draft.is_new { " New Host " } else { " Edit Host " };
+    let title = if draft.is_new {
+        " New Host "
+    } else {
+        " Edit Host "
+    };
     let block = Block::bordered()
         .title(title)
         .border_style(Style::default().fg(Color::Cyan));
@@ -228,9 +229,20 @@ pub fn render(f: &mut Frame, draft: &EditDraft, all_tags: &[String]) {
         );
 
         if *field == EditField::Tags {
-            f.render_widget(TagEditor { state: &draft.tags, focused }, value_area);
+            f.render_widget(
+                TagEditor {
+                    state: &draft.tags,
+                    focused,
+                },
+                value_area,
+            );
             if focused && !draft.tags.candidates.is_empty() {
-                render_candidates(f, value_area, &draft.tags.candidates, draft.tags.candidate_sel);
+                render_candidates(
+                    f,
+                    value_area,
+                    &draft.tags.candidates,
+                    draft.tags.candidate_sel,
+                );
             }
         } else {
             let value = field_value(draft, *field);
@@ -294,7 +306,10 @@ fn render_candidates(f: &mut Frame, anchor: Rect, candidates: &[String], sel: us
     };
 
     f.render_widget(Clear, popup);
-    let items: Vec<ListItem> = candidates.iter().map(|c| ListItem::new(c.as_str())).collect();
+    let items: Vec<ListItem> = candidates
+        .iter()
+        .map(|c| ListItem::new(c.as_str()))
+        .collect();
     let mut list_state = ListState::default();
     list_state.select(Some(sel));
     f.render_stateful_widget(

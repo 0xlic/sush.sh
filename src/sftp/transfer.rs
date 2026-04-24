@@ -61,7 +61,10 @@ async fn do_download(
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut rf = sftp.open(remote).await.context("failed to open remote file")?;
+    let mut rf = sftp
+        .open(remote)
+        .await
+        .context("failed to open remote file")?;
     let mut lf = tokio::fs::File::create(local).await?;
     let mut buf = vec![0u8; CHUNK];
     let mut acc = 0u64;
@@ -137,7 +140,10 @@ async fn do_upload(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let mut lf = tokio::fs::File::open(local).await?;
-    let mut rf = sftp.create(remote).await.context("failed to create remote file")?;
+    let mut rf = sftp
+        .create(remote)
+        .await
+        .context("failed to create remote file")?;
     let mut buf = vec![0u8; CHUNK];
     let mut acc = 0u64;
     loop {

@@ -1,20 +1,17 @@
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor};
+use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Widget};
-use ratatui::Frame;
 
 use crate::ssh::terminal::TerminalEmulator;
 use crate::tui::widgets::status_bar::StatusBar;
 
 pub fn render(f: &mut Frame, host_alias: &str, emulator: &TerminalEmulator) {
-    let [terminal_area, status_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(f.area());
+    let [terminal_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
 
     let block = Block::bordered()
         .title(format!(" SSH: {host_alias} "))
@@ -137,7 +134,11 @@ mod tests {
     #[test]
     fn spec_rgb_maps_to_ratatui_rgb() {
         use alacritty_terminal::vte::ansi::Rgb;
-        let rgb = AColor::Spec(Rgb { r: 255, g: 128, b: 0 });
+        let rgb = AColor::Spec(Rgb {
+            r: 255,
+            g: 128,
+            b: 0,
+        });
         assert_eq!(map_color(rgb), Color::Rgb(255, 128, 0));
     }
 }
