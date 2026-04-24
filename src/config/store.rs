@@ -18,6 +18,8 @@ pub struct HostStore {
 pub struct Metadata {
     #[serde(default)]
     pub ssh_config_hash: String,
+    #[serde(default)]
+    pub import_prompted: bool,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -31,34 +33,44 @@ pub fn config_path() -> PathBuf {
     config_dir().join("hosts.toml")
 }
 
+pub fn load_store(path: &Path) -> Result<HostStore> {
+    if !path.exists() {
+        return Ok(HostStore::default());
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config: {}", path.display()))?;
+    toml::from_str(&content).context("failed to parse config")
+}
+
+pub fn load_from(path: &Path) -> Result<(Vec<Host>, String)> {
+    let store = load_store(path)?;
+    Ok((store.hosts, store.metadata.ssh_config_hash))
+}
+
 #[allow(dead_code)]
 pub fn load_hosts() -> Result<Vec<Host>> {
     let (hosts, _) = load_from(&config_path())?;
     Ok(hosts)
 }
 
-pub fn load_from(path: &Path) -> Result<(Vec<Host>, String)> {
-    if !path.exists() {
-        return Ok((Vec::new(), String::new()));
-    }
-    let content =
-        fs::read_to_string(path).with_context(|| format!("failed to read config: {}", path.display()))?;
-    let store: HostStore = toml::from_str(&content).context("failed to parse config")?;
-    Ok((store.hosts, store.metadata.ssh_config_hash))
-}
-
 #[allow(dead_code)]
 pub fn save_hosts(hosts: &[Host], ssh_config_hash: &str) -> Result<()> {
-    save_to(&config_path(), hosts, ssh_config_hash)
+    save_to(&config_path(), hosts, ssh_config_hash, false)
 }
 
-pub fn save_to(path: &Path, hosts: &[Host], ssh_config_hash: &str) -> Result<()> {
+pub fn save_to(
+    path: &Path,
+    hosts: &[Host],
+    ssh_config_hash: &str,
+    import_prompted: bool,
+) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
     let store = HostStore {
         metadata: Metadata {
             ssh_config_hash: ssh_config_hash.to_string(),
+            import_prompted,
         },
         hosts: hosts.to_vec(),
     };
@@ -107,11 +119,29 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("hosts.toml");
         let hosts = vec![sample_host("a", HostSource::Manual)];
-        save_to(&path, &hosts, "hash1").unwrap();
+        save_to(&path, &hosts, "hash1", false).unwrap();
         let (loaded, hash) = load_from(&path).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "a");
         assert_eq!(hash, "hash1");
+    }
+
+    #[test]
+    fn import_prompted_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hosts.toml");
+        save_to(&path, &[], "", true).unwrap();
+        let store = load_store(&path).unwrap();
+        assert!(store.metadata.import_prompted);
+    }
+
+    #[test]
+    fn import_prompted_defaults_to_false_on_old_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, "[metadata]\nssh_config_hash = \"abc\"\n").unwrap();
+        let store = load_store(&path).unwrap();
+        assert!(!store.metadata.import_prompted);
     }
 
     #[test]
