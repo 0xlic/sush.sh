@@ -74,25 +74,11 @@ impl<'a> StatefulWidget for HostList<'a> {
         let items: Vec<ListItem> = self
             .indices
             .iter()
-            .enumerate()
-            .map(|(list_pos, &host_idx)| {
+            .map(|&host_idx| {
                 let h = &self.hosts[host_idx];
-                let is_selected = selected_pos == Some(list_pos);
-
-                let indicator: Span = if is_selected {
-                    match self.probe {
-                        None => Span::raw("    "),
-                        Some(None) => Span::styled("  ● ", Style::default().fg(Color::DarkGray)),
-                        Some(Some(true)) => Span::styled("  ● ", Style::default().fg(Color::Green)),
-                        Some(Some(false)) => Span::styled("  ● ", Style::default().fg(Color::Red)),
-                    }
-                } else {
-                    Span::raw("    ")
-                };
-
                 let tags = h.tags.join(",");
                 ListItem::new(Line::from(vec![
-                    indicator,
+                    Span::raw("    "),
                     Span::styled(format!("{:<16}", h.alias), Style::default().fg(Color::Cyan)),
                     Span::raw(format!("{:<20}", h.hostname)),
                     Span::styled(tags, Style::default().fg(Color::Yellow)),
@@ -110,6 +96,28 @@ impl<'a> StatefulWidget for HostList<'a> {
             buf,
             state,
         );
+
+        // Draw probe dot directly to buffer after List renders, bypassing highlight_style color
+        // interference. The dot is written at the selected row's position in the list area.
+        if let (Some(sel), Some(dot_color)) = (
+            selected_pos,
+            match self.probe {
+                Some(None) => Some(Color::DarkGray),
+                Some(Some(true)) => Some(Color::Green),
+                Some(Some(false)) => Some(Color::Red),
+                None => None,
+            },
+        ) {
+            let y = sections[1].y + sel as u16;
+            let x = sections[1].x + 2; // 2-space indent before dot
+            if y < sections[1].bottom() && x < sections[1].right() {
+                let cell = &mut buf[(x, y)];
+                cell.set_symbol("●");
+                cell.set_fg(dot_color);
+                // Ensure the dot isn't reversed by the highlight style
+                cell.set_style(cell.style().remove_modifier(Modifier::REVERSED));
+            }
+        }
     }
 }
 

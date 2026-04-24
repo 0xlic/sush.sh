@@ -100,6 +100,7 @@ pub struct App {
     pub hover_since: Option<Instant>,
     pub probe_rx: Option<tokio::sync::oneshot::Receiver<bool>>,
     pub probe_result: Option<bool>,
+    pub status_msg: Option<(String, Instant)>,
     pub show_import_prompt: bool,
     pwd_dialog: Option<PwdDialog>,
 }
@@ -152,6 +153,7 @@ impl App {
             hover_since: None,
             probe_rx: None,
             probe_result: None,
+            status_msg: None,
             show_import_prompt: false,
             pwd_dialog: None,
         })
@@ -196,7 +198,8 @@ impl App {
                         .ssh_connect_and_takeover(terminal, &mut bus, &host)
                         .await
                     {
-                        eprintln!("[Connection error: {e}]");
+                        self.connection_history.record(&host.alias);
+                        self.set_status(format!("Connection failed: {e}"));
                     }
                 }
             }
@@ -210,7 +213,8 @@ impl App {
                 {
                     let host = self.hosts[idx].clone();
                     if let Err(e) = self.sftp_connect(terminal, &mut bus, &host).await {
-                        eprintln!("[SFTP error: {e}]");
+                        self.connection_history.record(&host.alias);
+                        self.set_status(format!("SFTP failed: {e}"));
                     }
                 }
             }
@@ -360,6 +364,12 @@ impl App {
             {
                 self.leave_ssh_mode(terminal).await?;
             }
+        }
+        // Clear status message after 4 seconds.
+        if let Some((_, since)) = &self.status_msg
+            && since.elapsed() >= std::time::Duration::from_secs(4)
+        {
+            self.status_msg = None;
         }
         // Connectivity probe — only in Main mode.
         if self.mode == AppMode::Main {
@@ -622,6 +632,10 @@ impl App {
         };
         self.list_state.select(sel);
         self.on_selection_changed();
+    }
+
+    fn set_status(&mut self, msg: String) {
+        self.status_msg = Some((msg, Instant::now()));
     }
 
     fn reset_probe(&mut self) {
@@ -1530,6 +1544,7 @@ mod tests {
             hover_since: None,
             probe_rx: None,
             probe_result: None,
+            status_msg: None,
             show_import_prompt: false,
             pwd_dialog: None,
         }
