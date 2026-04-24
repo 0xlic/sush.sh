@@ -1,3 +1,4 @@
+pub mod edit_view;
 pub mod main_view;
 pub mod password_dialog;
 pub mod sftp_view;
