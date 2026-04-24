@@ -46,10 +46,10 @@ impl TagEditorState {
         self.recompute_candidates(all_tags);
     }
 
-    pub fn handle_backspace(&mut self) {
+    pub fn handle_backspace(&mut self, all_tags: &[String]) {
         if !self.input.is_empty() {
             self.input.pop();
-            self.recompute_candidates(&[]);
+            self.recompute_candidates(all_tags);
         } else if self.cursor > 0 {
             self.tags.remove(self.cursor - 1);
             self.cursor -= 1;
@@ -130,15 +130,22 @@ impl Widget for TagEditor<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let mut spans: Vec<Span> = Vec::new();
         for (i, tag) in self.state.tags.iter().enumerate() {
-            // Show cursor marker between tags when focused and no active input
-            if self.focused && self.state.input.is_empty() && self.state.cursor == i {
-                spans.push(Span::styled("|", Style::default().fg(Color::Cyan)));
+            if self.focused && self.state.cursor == i {
+                if self.state.input.is_empty() {
+                    spans.push(Span::styled("|", Style::default().fg(Color::Cyan)));
+                } else {
+                    spans.push(Span::raw(self.state.input.as_str()));
+                    spans.push(Span::styled(
+                        "█",
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ));
+                }
             }
             spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
             spans.push(Span::styled(tag.as_str(), Style::default().fg(Color::Cyan)));
             spans.push(Span::styled("] ", Style::default().fg(Color::DarkGray)));
         }
-        // Input area at the cursor (after all tags or inline)
+        // Handle cursor at end (after all tags)
         if self.focused && self.state.cursor == self.state.tags.len() {
             if !self.state.input.is_empty() {
                 spans.push(Span::raw(self.state.input.as_str()));
@@ -201,7 +208,7 @@ mod tests {
     #[test]
     fn backspace_without_input_deletes_left_tag() {
         let mut s = state(&["web", "prod"]);
-        s.handle_backspace();
+        s.handle_backspace(&[]);
         assert_eq!(s.tags, vec!["web"]);
         assert_eq!(s.cursor, 1);
     }
@@ -210,7 +217,7 @@ mod tests {
     fn backspace_without_input_at_zero_does_nothing() {
         let mut s = state(&["web"]);
         s.cursor = 0;
-        s.handle_backspace();
+        s.handle_backspace(&[]);
         assert_eq!(s.tags, vec!["web"]);
     }
 
@@ -225,7 +232,7 @@ mod tests {
     fn backspace_with_input_removes_last_char() {
         let mut s = state(&[]);
         s.input = "te".into();
-        s.handle_backspace();
+        s.handle_backspace(&[]);
         assert_eq!(s.input, "t");
     }
 
@@ -233,10 +240,10 @@ mod tests {
     fn backspace_empties_input_then_deletes_tag() {
         let mut s = state(&["web"]);
         s.input = "x".into();
-        s.handle_backspace(); // clears input
+        s.handle_backspace(&[]); // clears input
         assert_eq!(s.input, "");
         assert_eq!(s.tags, vec!["web"]); // tag not yet deleted
-        s.handle_backspace(); // now deletes tag
+        s.handle_backspace(&[]); // now deletes tag
         assert_eq!(s.tags, Vec::<String>::new());
     }
 
@@ -272,6 +279,16 @@ mod tests {
         let all = vec!["web".into(), "nginx".into()];
         s.handle_char('n', &all);
         assert!(s.candidates.is_empty());
+    }
+
+    #[test]
+    fn backspace_mid_input_recomputes_candidates() {
+        let mut s = state(&[]);
+        let all = vec!["nginx".into(), "none".into(), "node".into()];
+        s.handle_char('n', &all);
+        s.handle_char('g', &all); // input = "ng", candidates = ["nginx"]
+        s.handle_backspace(&all); // input = "n", candidates should have 3 matches
+        assert_eq!(s.candidates.len(), 3);
     }
 
     #[test]
