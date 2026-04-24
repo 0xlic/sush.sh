@@ -1,6 +1,6 @@
 # sush.sh (sush) Roadmap
 
-## v0.1 — MVP（当前）
+## v0.1 — MVP（已完成）
 
 核心体验：搜索主机 → SSH 连接 → 无缝切 SFTP → 上传下载文件
 
@@ -13,14 +13,14 @@
 - [x] 底部快捷键提示栏
 - [x] 双 Ctrl-C 返回主界面
 
-## v0.2 — 嵌入式终端模式
+## v0.2 — 嵌入式终端模式（已完成）
 
 **架构调整**：将 SSH 模式从接管模式（LeaveAlternateScreen + I/O 直传）切换为嵌入式终端模拟器模式，sush 界面在 SSH 连接期间始终可见。
 
-- [ ] 集成 `alacritty_terminal` 作为 VT100/xterm 状态机
-- [ ] 实现 `TerminalView` ratatui widget（将虚拟屏幕 cell 渲染到 ratatui 画布）
-- [ ] 状态栏在 SSH 模式下持续显示主机名与快捷键提示
-- [ ] 前缀键（Ctrl-\）在 TUI 层处理，不再需要切换 alternate screen
+- [x] 集成 `alacritty_terminal` 作为 VT100/xterm 状态机
+- [x] 实现 `TerminalView` ratatui widget（将虚拟屏幕 cell 渲染到 ratatui 画布）
+- [x] 状态栏在 SSH 模式下持续显示主机名与快捷键提示
+- [x] 前缀键（Ctrl-\）在 TUI 层处理，不再需要切换 alternate screen
 
 ## v0.3 — 主机管理增强
 
