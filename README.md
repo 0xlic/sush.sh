@@ -106,7 +106,7 @@ Requires Rust 1.95+. No other dependencies.
 sush
 ```
 
-On first launch, `sush` imports your existing `~/.ssh/config`. If you don't have one, you'll start with an empty list (TUI host editor is coming in v0.3).
+On first launch, `sush` will ask whether to import from `~/.ssh/config`. You can also press `n` to add hosts manually, or `i` to import at any time.
 
 **Navigation**
 | Key | Action |
@@ -115,6 +115,10 @@ On first launch, `sush` imports your existing `~/.ssh/config`. If you don't have
 | `↑` / `↓` | Move through host list |
 | `Enter` | Connect via SSH |
 | `s` | Open SFTP browser |
+| `n` | New host |
+| `e` | Edit selected host |
+| `d` | Delete selected host |
+| `i` | Import from `~/.ssh/config` |
 | `q` | Quit |
 
 **SSH mode**
@@ -161,7 +165,7 @@ On first launch, `sush` imports your existing `~/.ssh/config`. If you don't have
 |---------|-------|
 | **v0.1** ✅ | SSH connect · SFTP browser · upload/download · `Ctrl-\` switching |
 | **v0.2** ✅ | Embedded terminal emulator · TUI visible during SSH sessions |
-| v0.3 | TUI host editor · tag management · description field |
+| **v0.3** ✅ | TUI host editor · tag chip editor · manual SSH config import |
 | v0.4 | Connection history · recent-use sorting · connectivity check |
 | v0.5 | Path-type tags · virtual folder navigation |
 | v0.6 | Credential encryption (master password) |

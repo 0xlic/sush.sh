@@ -94,13 +94,17 @@ src/
 │   │   ├── main_view.rs     # 主界面（搜索 + 列表）
 │   │   ├── ssh_view.rs      # SSH 终端视图（包含 TerminalView widget）
 │   │   ├── sftp_view.rs     # SFTP 文件浏览器
+│   │   ├── edit_view.rs     # 主机新建/编辑全屏表单
+│   │   ├── import_view.rs   # SSH config 手动导入选择视图
 │   │   └── password_dialog.rs  # 密码输入弹窗
 │   └── widgets/
 │       ├── search_input.rs  # 搜索框组件
 │       ├── host_list.rs     # 主机列表组件
 │       ├── file_list.rs     # 文件列表组件
 │       ├── progress_bar.rs  # 传输进度条
-│       └── status_bar.rs    # 底部快捷键提示栏
+│       ├── status_bar.rs    # 底部快捷键提示栏
+│       ├── tag_editor.rs    # chip 标签编辑器（TagEditorState + TagEditor widget）
+│       └── confirm_dialog.rs  # 通用确认弹窗
 └── utils/
     ├── mod.rs
     └── fuzzy.rs         # 模糊搜索封装
@@ -112,22 +116,11 @@ src/
 
 ```rust
 enum AppMode {
-    Main,  // 主界面：搜索 + 主机列表
-    Ssh,   // SSH 接管模式
-    Sftp,  // SFTP 文件浏览器
-}
-
-struct App {
-    mode: AppMode,
-    hosts: Vec<Host>,
-    search_query: String,
-    filtered_indices: Vec<usize>,    // 搜索结果索引
-    main_focus: MainFocus,           // 主界面焦点：列表 / 搜索框
-    list_state: ListState,           // 当前列表选中项
-    active_session: Option<ActiveSession>,
-    sftp_client: Option<SftpClient>,
-    sftp_pane: Option<SftpPaneState>,
-    active_transfer: Option<ActiveTransfer>,
+    Main,             // 主界面：搜索 + 主机列表
+    Ssh,              // SSH 嵌入式终端模式
+    Sftp,             // SFTP 文件浏览器
+    Edit,             // 主机新建/编辑全屏表单
+    ImportSshConfig,  // SSH config 手动导入选择视图
 }
 ```
 
@@ -141,6 +134,12 @@ struct App {
   └────────────────┘     ────────────────┘
         s
  Main ──────→ Sftp（直接进入 SFTP，不经过 SSH 模式）
+        n/e
+ Main ──────→ Edit（新建/编辑主机，Ctrl-S 保存，ESC 取消）
+        i
+ Main ──────→ ImportSshConfig（选择导入，Enter 确认，ESC 取消）
+        首次启动（hosts 为空且未提示过）
+ Main ← ConfirmDialog → ImportSshConfig
 ```
 
 #### `config/host.rs` — 主机数据结构
