@@ -166,7 +166,7 @@ On first launch, `sush` will ask whether to import from `~/.ssh/config`. You can
 | **v0.1** ✅ | SSH connect · SFTP browser · upload/download · `Ctrl-\` switching |
 | **v0.2** ✅ | Embedded terminal emulator · TUI visible during SSH sessions |
 | **v0.3** ✅ | TUI host editor · tag chip editor · manual SSH config import |
-| v0.4 | Connection history · recent-use sorting · connectivity check |
+| **v0.4** ✅ | Connection history · recency-boosted search · TCP connectivity probe |
 | v0.5 | Path-type tags · virtual folder navigation |
 | v0.6 | Credential encryption (master password) |
 | v0.7 | Recursive folder transfer · remote file editing · dual-pane SFTP |

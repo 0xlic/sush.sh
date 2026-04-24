@@ -19,6 +19,7 @@
 | 跨平台路径 | dirs | 6.0 | XDG 规范目录 |
 | 主机 ID | uuid | 1.23 | 预留依赖，当前实现未使用 |
 | 终端模拟器 | alacritty_terminal | — | VT100/xterm 状态机，SSH 嵌入式终端渲染（v0.2 引入）|
+| 时间处理 | chrono | 0.4 | 连接历史时间戳 RFC3339 序列化（v0.4 引入）|
 
 ### 关于 russh + russh-sftp 的风险说明
 
@@ -77,7 +78,8 @@ src/
 │   ├── mod.rs           # 配置模块入口
 │   ├── host.rs          # Host 数据结构
 │   ├── store.rs         # TOML 读写
-│   └── ssh_config.rs    # ~/.ssh/config 解析与导入
+│   ├── ssh_config.rs    # ~/.ssh/config 解析与导入
+│   └── history.rs       # 连接历史（history.toml），时间戳记录与查询
 ├── ssh/
 │   ├── mod.rs           # SSH 模块入口
 │   ├── session.rs       # russh 会话管理
