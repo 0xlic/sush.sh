@@ -95,6 +95,8 @@ impl App {
 
         let hosts = if !new_hash.is_empty() && new_hash != prev_hash {
             let merged = store::merge_ssh_config_hosts(existing, imported);
+            // import_prompted=false here is safe: Task 6 rewrites App::new() entirely
+            // to use load_store() and thread the actual value through.
             store::save_to(&store::config_path(), &merged, &new_hash, false)?;
             merged
         } else {
