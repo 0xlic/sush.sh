@@ -48,7 +48,7 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 **Zero friction SSH**
 - Reads `~/.ssh/config` automatically on startup — your hosts are already there
 - Fuzzy search across hostname, IP, user, tags, and description
-- Full takeover mode: `vim`, `tmux`, `htop` all work perfectly
+- Embedded terminal emulator: `vim`, `tmux`, `htop` all work correctly
 
 **Seamless SSH ↔ SFTP switching**
 - `Ctrl-\` flips between SSH shell and SFTP browser
@@ -106,7 +106,7 @@ Requires Rust 1.95+. No other dependencies.
 sush
 ```
 
-On first launch, `sush` imports your existing `~/.ssh/config`. If you don't have one, you'll start with an empty list (host management UI is coming in v0.2).
+On first launch, `sush` imports your existing `~/.ssh/config`. If you don't have one, you'll start with an empty list (TUI host editor is coming in v0.3).
 
 **Navigation**
 | Key | Action |
@@ -147,13 +147,11 @@ On first launch, `sush` imports your existing `~/.ssh/config`. If you don't have
 
 ## How it works
 
-`sush` uses **takeover mode** rather than an embedded terminal emulator. When you connect to a host, `sush` holds the I/O channel and forwards bytes directly between your terminal and the remote PTY. This means:
+`sush` uses an **embedded terminal emulator** (powered by [alacritty_terminal](https://github.com/alacritty/alacritty)). When you connect to a host, `sush` feeds remote PTY output into an in-process VT100/xterm state machine and renders the result as a ratatui widget — so the sush UI (status bar, key hints) stays visible throughout the session.
 
-- Terminal programs behave exactly as they would in a raw SSH session
-- No rendering overhead from a secondary terminal layer
-- `Ctrl-\` is intercepted as a prefix key; everything else is passed through
-
-SSH and SFTP share the same TCP connection via separate channels, so switching modes is instant and doesn't re-authenticate.
+- Terminal programs (`vim`, `tmux`, `htop`) work correctly via full VT100 emulation
+- `Ctrl-\` is intercepted as a prefix key within the TUI; everything else is forwarded to the remote
+- SSH and SFTP share the same TCP connection via separate channels — switching is instant and doesn't re-authenticate
 
 ---
 
@@ -162,9 +160,13 @@ SSH and SFTP share the same TCP connection via separate channels, so switching m
 | Version | Focus |
 |---------|-------|
 | **v0.1** ✅ | SSH connect · SFTP browser · upload/download · `Ctrl-\` switching |
-| v0.2 | TUI host editor · tag management · credential encryption · connection history |
-| v0.3 | Recursive folder transfer · remote file editing · dual-pane SFTP |
-| v0.5 | Port forwarding · ProxyJump chains · SOCKS5 proxy |
+| **v0.2** ✅ | Embedded terminal emulator · TUI visible during SSH sessions |
+| v0.3 | TUI host editor · tag management · description field |
+| v0.4 | Connection history · recent-use sorting · connectivity check |
+| v0.5 | Path-type tags · virtual folder navigation |
+| v0.6 | Credential encryption (master password) |
+| v0.7 | Recursive folder transfer · remote file editing · dual-pane SFTP |
+| v0.8 | Port forwarding · ProxyJump chains · SOCKS5 proxy |
 | v1.0 | Homebrew/AUR/Scoop · man page · full platform testing |
 
 ---
