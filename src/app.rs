@@ -146,9 +146,22 @@ impl App {
 
     pub async fn run(&mut self) -> Result<()> {
         let mut terminal = setup_terminal()?;
+        self.check_first_launch_import();
         let result = self.event_loop(&mut terminal).await;
         restore_terminal(&mut terminal)?;
         result
+    }
+
+    fn check_first_launch_import(&mut self) {
+        if self.import_prompted || !self.hosts.is_empty() {
+            return;
+        }
+        let has_ssh_hosts = crate::config::ssh_config::import_ssh_config()
+            .map(|(h, _)| !h.is_empty())
+            .unwrap_or(false);
+        if has_ssh_hosts {
+            self.show_import_prompt = true;
+        }
     }
 
     async fn event_loop(
