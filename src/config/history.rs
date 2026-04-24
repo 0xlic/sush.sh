@@ -5,19 +5,19 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct HistoryStore {
     #[serde(default)]
     connections: HashMap<String, DateTime<Utc>>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub struct ConnectionHistory {
     connections: HashMap<String, DateTime<Utc>>,
     path: PathBuf,
 }
 
+// dead_code suppressed until App integration in Task 2
 #[allow(dead_code)]
 impl ConnectionHistory {
     pub fn load(path: PathBuf) -> Self {
