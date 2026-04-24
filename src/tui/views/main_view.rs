@@ -1,7 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::ListState;
 
 use crate::app::{App, MainFocus};
 use crate::tui::widgets::host_list::HostList;
@@ -36,39 +35,33 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
         None
     };
 
+    let status_msg = app.status_msg.as_ref().map(|(s, _)| s.as_str());
+
     f.render_stateful_widget(
         HostList {
             hosts: &app.hosts,
             indices: &app.filtered_indices,
             focused: !search_focused,
             probe,
+            status_msg,
         },
         chunks[1],
         list_state,
     );
 
-    // Show temporary status message (e.g. connection error) for a few seconds,
-    // then fall back to key hints.
-    if let Some((msg, _)) = &app.status_msg {
-        f.render_widget(
-            Paragraph::new(msg.as_str()).style(Style::default().fg(Color::Red)),
-            chunks[2],
-        );
+    let hints: &[(&str, &str)] = if search_focused {
+        &[("Enter/Esc", "Back")]
     } else {
-        let hints: &[(&str, &str)] = if search_focused {
-            &[("Enter/Esc", "Back")]
-        } else {
-            &[
-                ("/", "Search"),
-                ("Enter", "SSH"),
-                ("s", "SFTP"),
-                ("n", "New"),
-                ("e", "Edit"),
-                ("d", "Delete"),
-                ("i", "Import"),
-                ("q", "Quit"),
-            ]
-        };
-        f.render_widget(StatusBar { hints }, chunks[2]);
-    }
+        &[
+            ("/", "Search"),
+            ("Enter", "SSH"),
+            ("s", "SFTP"),
+            ("n", "New"),
+            ("e", "Edit"),
+            ("d", "Delete"),
+            ("i", "Import"),
+            ("q", "Quit"),
+        ]
+    };
+    f.render_widget(StatusBar { hints }, chunks[2]);
 }

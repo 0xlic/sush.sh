@@ -10,7 +10,8 @@ pub struct HostList<'a> {
     pub hosts: &'a [Host],
     pub indices: &'a [usize],
     pub focused: bool,
-    pub probe: Option<Option<bool>>, // None=no dot, Some(None)=gray, Some(Some(bool))=colored
+    pub probe: Option<Option<bool>>,  // None=no dot, Some(None)=gray, Some(Some(bool))=colored
+    pub status_msg: Option<&'a str>,  // error / info shown in description row (red)
 }
 
 impl<'a> StatefulWidget for HostList<'a> {
@@ -54,7 +55,8 @@ impl<'a> StatefulWidget for HostList<'a> {
         ]);
         Paragraph::new(header).render(sections[0], buf);
 
-        // Description row: dot color reflects probe state; dot always shows when probe active.
+        // Description row: shows ● + error/description text.
+        // Error message (red) takes priority over description; probe color applied to dot.
         let desc = state
             .selected()
             .and_then(|sel| self.indices.get(sel))
@@ -66,11 +68,17 @@ impl<'a> StatefulWidget for HostList<'a> {
             Some(Some(false)) => Color::Red,
             None => Color::Yellow,
         };
-        let show_dot = self.probe.is_some() || !desc.is_empty();
-        let desc_spans = if show_dot {
+        let text = self.status_msg.unwrap_or(desc);
+        let show_row = self.probe.is_some() || !text.is_empty();
+        let desc_spans = if show_row {
+            let text_style = if self.status_msg.is_some() {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+            };
             let mut spans = vec![Span::styled("  ● ", Style::default().fg(dot_color))];
-            if !desc.is_empty() {
-                spans.push(Span::raw(desc));
+            if !text.is_empty() {
+                spans.push(Span::styled(text, text_style));
             }
             Line::from(spans)
         } else {
@@ -147,6 +155,7 @@ mod tests {
                 indices: &indices,
                 focused: false,
                 probe: None,
+                status_msg: None,
             },
             area,
             &mut buf,
