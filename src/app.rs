@@ -96,6 +96,10 @@ pub struct App {
     pub confirm_delete: bool,
     pub import_prompted: bool,
     pub connection_history: ConnectionHistory,
+    pub hover_host_id: Option<String>,
+    pub hover_since: Option<Instant>,
+    pub probe_rx: Option<tokio::sync::oneshot::Receiver<bool>>,
+    pub probe_result: Option<bool>,
     pub show_import_prompt: bool,
     pwd_dialog: Option<PwdDialog>,
 }
@@ -144,6 +148,10 @@ impl App {
             confirm_delete: false,
             import_prompted,
             connection_history,
+            hover_host_id: None,
+            hover_since: None,
+            probe_rx: None,
+            probe_result: None,
             show_import_prompt: false,
             pwd_dialog: None,
         })
@@ -351,6 +359,39 @@ impl App {
                 .is_some_and(|session| !session.has_pty())
             {
                 self.leave_ssh_mode(terminal).await?;
+            }
+        }
+        // Connectivity probe — only in Main mode.
+        if self.mode == AppMode::Main {
+            // Collect completed probe result.
+            if let Some(rx) = &mut self.probe_rx
+                && let Ok(result) = rx.try_recv()
+            {
+                self.probe_result = Some(result);
+                self.probe_rx = None;
+            }
+            // Start probe after 1s hover, if none is running or completed.
+            if self.probe_rx.is_none()
+                && self.probe_result.is_none()
+                && self.hover_since.is_some_and(|s| s.elapsed() >= std::time::Duration::from_secs(1))
+                && let Some(&idx) = self
+                    .filtered_indices
+                    .get(self.list_state.selected().unwrap_or(0))
+            {
+                let hostname = self.hosts[idx].hostname.clone();
+                let port = self.hosts[idx].port;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let ok = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        tokio::net::TcpStream::connect((hostname.as_str(), port)),
+                    )
+                    .await
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false);
+                    let _ = tx.send(ok);
+                });
+                self.probe_rx = Some(rx);
             }
         }
         Ok(())
@@ -580,6 +621,27 @@ impl App {
             Some(0)
         };
         self.list_state.select(sel);
+        self.on_selection_changed();
+    }
+
+    fn reset_probe(&mut self) {
+        self.hover_host_id = None;
+        self.hover_since = None;
+        self.probe_rx = None;
+        self.probe_result = None;
+    }
+
+    fn on_selection_changed(&mut self) {
+        let new_id = self
+            .filtered_indices
+            .get(self.list_state.selected().unwrap_or(0))
+            .map(|&i| self.hosts[i].id.clone());
+
+        if self.hover_host_id != new_id {
+            self.reset_probe();
+            self.hover_host_id = new_id;
+            self.hover_since = Some(Instant::now());
+        }
     }
 
     fn open_import_view(&mut self) {
@@ -606,6 +668,7 @@ impl App {
             (KeyCode::Esc, _) => {
                 self.edit_draft = None;
                 self.mode = AppMode::Main;
+                self.on_selection_changed();
                 return;
             }
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
@@ -766,6 +829,7 @@ impl App {
                 self.import_prompted = true;
                 self.mode = AppMode::Main;
                 self.save_hosts_to_disk();
+                self.on_selection_changed();
             }
             KeyCode::Enter => {
                 let selected = state.selected_hosts();
@@ -795,12 +859,14 @@ impl App {
         let i = self.list_state.selected().unwrap_or(0);
         let next = (i + 1).min(self.filtered_indices.len() - 1);
         self.list_state.select(Some(next));
+        self.on_selection_changed();
     }
 
     fn select_previous(&mut self) {
         let i = self.list_state.selected().unwrap_or(0);
         let prev = i.saturating_sub(1);
         self.list_state.select(Some(prev));
+        self.on_selection_changed();
     }
 
     async fn sftp_connect(
@@ -1460,6 +1526,10 @@ mod tests {
             confirm_delete: false,
             import_prompted: false,
             connection_history: ConnectionHistory::load(std::path::PathBuf::from("/tmp/sush-test-history.toml")),
+            hover_host_id: None,
+            hover_since: None,
+            probe_rx: None,
+            probe_result: None,
             show_import_prompt: false,
             pwd_dialog: None,
         }
