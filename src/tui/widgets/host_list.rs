@@ -87,7 +87,7 @@ impl<'a> StatefulWidget for HostList<'a> {
                     Span::raw("  "),
                     Span::styled(format!("{:<16}", h.alias), Style::default().fg(Color::Cyan)),
                     Span::raw(format!("{:<20}", h.hostname)),
-                    Span::styled(tags, Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled(tags, Style::default().fg(Color::Yellow)),
                 ]))
             })
             .collect();
@@ -128,7 +128,10 @@ mod tests {
 
     #[test]
     fn description_renders_when_selected() {
-        let hosts = vec![host_with_desc("192.168.7.2", "West District dev environment")];
+        let hosts = vec![host_with_desc(
+            "192.168.7.2",
+            "West District dev environment",
+        )];
         let indices = vec![0usize];
         let mut state = ListState::default();
         state.select(Some(0));

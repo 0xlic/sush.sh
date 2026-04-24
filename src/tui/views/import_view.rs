@@ -75,11 +75,8 @@ impl ImportViewState {
 
 #[allow(dead_code)]
 pub fn render(f: &mut Frame, state: &ImportViewState) {
-    let [list_area, status_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(f.area());
+    let [list_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
 
     let block = Block::bordered()
         .title(" Import from ~/.ssh/config ")
@@ -92,7 +89,7 @@ pub fn render(f: &mut Frame, state: &ImportViewState) {
             let checkbox = if e.already_exists {
                 "[~]"
             } else if e.selected {
-                "[x]"
+                "[✓]"
             } else {
                 "[ ]"
             };

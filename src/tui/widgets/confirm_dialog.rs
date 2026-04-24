@@ -17,23 +17,21 @@ impl<'a> ConfirmDialog<'a> {
     }
 
     pub fn render(&self, f: &mut Frame) {
-        let area = centered_rect(50, 25, f.area());
+        // Fixed height: 5 rows (2 borders + message + gap + hints), width 50%
+        let area = centered_fixed(50, 5, f.area());
         f.render_widget(Clear, area);
         let block = Block::default()
             .title(format!(" {} ", self.title))
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Yellow));
-        let inner = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(1)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(block.inner(area));
+        let [msg_area, _, hints_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(block.inner(area));
         f.render_widget(block, area);
-        f.render_widget(Paragraph::new(self.message), inner[0]);
+        f.render_widget(Paragraph::new(self.message), msg_area);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("y", Style::default().fg(Color::Yellow)),
@@ -41,19 +39,21 @@ impl<'a> ConfirmDialog<'a> {
                 Span::styled("n/ESC", Style::default().fg(Color::Yellow)),
                 Span::raw(":No"),
             ])),
-            inner[2],
+            hints_area,
         );
     }
 }
 
+// Center a popup with a fixed height (rows) and percentage width.
 #[allow(dead_code)]
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+fn centered_fixed(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let vert_pad = r.height.saturating_sub(height) / 2;
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Length(vert_pad),
+            Constraint::Length(height),
+            Constraint::Min(0),
         ])
         .split(r);
     Layout::default()
