@@ -28,7 +28,7 @@ impl ImportViewState {
             .map(|h| {
                 let already_exists = existing.iter().any(|e| e.id == h.id);
                 ImportEntry {
-                    selected: !already_exists,
+                    selected: false,
                     host: h,
                     already_exists,
                 }
