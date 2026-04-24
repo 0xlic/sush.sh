@@ -17,8 +17,6 @@ pub struct ConnectionHistory {
     path: PathBuf,
 }
 
-// dead_code suppressed until App integration in Task 2
-#[allow(dead_code)]
 impl ConnectionHistory {
     pub fn load(path: PathBuf) -> Self {
         let connections = if path.exists() {
@@ -38,10 +36,12 @@ impl ConnectionHistory {
         self.persist();
     }
 
+    #[allow(dead_code)]
     pub fn last_connected(&self, host_id: &str) -> Option<&DateTime<Utc>> {
         self.connections.get(host_id)
     }
 
+    #[allow(dead_code)]
     pub fn days_since(&self, host_id: &str) -> Option<i64> {
         self.connections
             .get(host_id)

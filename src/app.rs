@@ -9,6 +9,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
 use russh::ChannelMsg;
 
+use crate::config::history::ConnectionHistory;
 use crate::config::host::Host;
 use crate::config::store;
 use crate::sftp::client::{SftpClient, list_local};
@@ -94,6 +95,7 @@ pub struct App {
     pub import_state: Option<ImportViewState>,
     pub confirm_delete: bool,
     pub import_prompted: bool,
+    pub connection_history: ConnectionHistory,
     pub show_import_prompt: bool,
     pwd_dialog: Option<PwdDialog>,
 }
@@ -103,6 +105,8 @@ impl App {
         let store = store::load_store(&store::config_path())?;
         let hosts = store.hosts;
         let import_prompted = store.metadata.import_prompted;
+        let history_path = store::config_dir().join("history.toml");
+        let connection_history = ConnectionHistory::load(history_path);
 
         let filtered_indices: Vec<usize> = (0..hosts.len()).collect();
         let mut list_state = ListState::default();
@@ -139,6 +143,7 @@ impl App {
             import_state: None,
             confirm_delete: false,
             import_prompted,
+            connection_history,
             show_import_prompt: false,
             pwd_dialog: None,
         })
@@ -816,6 +821,7 @@ impl App {
         self.current_host_alias = Some(host.alias.clone());
         self.active_session = Some(session);
         self.mode = AppMode::Sftp;
+        self.connection_history.record(&host.alias);
         Ok(())
     }
 
@@ -994,6 +1000,7 @@ impl App {
         self.active_session = Some(session);
         self.current_host_alias = Some(host.alias.clone());
         self.mode = AppMode::Ssh;
+        self.connection_history.record(&host.alias);
         self.ssh_last_size = Some((cols, rows));
         Ok(())
     }
@@ -1415,6 +1422,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::history::ConnectionHistory;
     use crate::config::host::{Host, HostSource};
 
     fn app_with(hosts: Vec<Host>) -> App {
@@ -1447,6 +1455,7 @@ mod tests {
             import_state: None,
             confirm_delete: false,
             import_prompted: false,
+            connection_history: ConnectionHistory::load(std::path::PathBuf::from("/tmp/sush-test-history.toml")),
             show_import_prompt: false,
             pwd_dialog: None,
         }
