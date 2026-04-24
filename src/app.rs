@@ -569,7 +569,11 @@ impl App {
     }
 
     fn apply_search(&mut self) {
-        self.filtered_indices = crate::utils::fuzzy::search(&self.search_query, &self.hosts);
+        self.filtered_indices = crate::utils::fuzzy::search(
+            &self.search_query,
+            &self.hosts,
+            &self.connection_history,
+        );
         let sel = if self.filtered_indices.is_empty() {
             None
         } else {
