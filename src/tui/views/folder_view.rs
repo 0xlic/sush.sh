@@ -238,6 +238,187 @@ pub fn jump_candidates(query: &str, tree: &HashMap<String, FolderNode>) -> Vec<S
     matches
 }
 
+// ── Rendering ─────────────────────────────────────────────────────────────────
+
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
+
+use crate::tui::widgets::host_list::HostList;
+use crate::tui::widgets::status_bar::StatusBar;
+
+#[allow(dead_code)]
+pub fn render(
+    f: &mut Frame,
+    state: &FolderViewState,
+    hosts: &[Host],
+    host_indices: &[usize],
+    probe: Option<Option<bool>>,
+) {
+    let [content_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+
+    let [col_a_area, col_b_area, hosts_area] = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+    ])
+    .areas(content_area);
+
+    render_dir_col(f, col_a_area, &state.col_a, state.sel_a, state.focus == FolderFocus::DirA, &state.tree);
+    render_dir_col(f, col_b_area, &state.col_b, state.sel_b, state.focus == FolderFocus::DirB, &state.tree);
+
+    let mut host_list_state = ListState::default();
+    if !host_indices.is_empty() {
+        host_list_state.select(Some(state.host_sel.min(host_indices.len() - 1)));
+    }
+    f.render_stateful_widget(
+        HostList {
+            hosts,
+            indices: host_indices,
+            focused: state.focus == FolderFocus::Hosts,
+            probe,
+            status_msg: None,
+        },
+        hosts_area,
+        &mut host_list_state,
+    );
+
+    f.render_widget(
+        StatusBar {
+            hints: &[
+                ("j", "Jump"),
+                ("/", "Search"),
+                ("Tab", "Switch"),
+                ("Enter", "Enter dir"),
+                ("ESC", "Exit"),
+            ],
+        },
+        status_area,
+    );
+
+    // Overlays drawn last (on top)
+    if let Some(jump) = &state.jump {
+        render_jump_floater(f, jump);
+    }
+    if let Some(search) = &state.search {
+        render_search_bar(f, search);
+    }
+}
+
+fn render_dir_col(
+    f: &mut Frame,
+    area: Rect,
+    paths: &[String],
+    sel: usize,
+    focused: bool,
+    tree: &HashMap<String, FolderNode>,
+) {
+    let block = if focused {
+        Block::bordered().border_style(Style::default().fg(Color::Cyan))
+    } else {
+        Block::bordered()
+    };
+
+    if paths.is_empty() {
+        f.render_widget(block, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = paths
+        .iter()
+        .map(|p| {
+            let node = tree.get(p);
+            let has_children = node.is_some_and(|n| !n.children.is_empty());
+            let name = node.map(|n| n.name.as_str()).unwrap_or(p.as_str());
+            let indicator = if has_children { "▶ " } else { "  " };
+            ListItem::new(Line::from(vec![
+                Span::raw(indicator),
+                Span::styled(name, Style::default().fg(Color::Cyan)),
+            ]))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(sel));
+
+    f.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .add_modifier(Modifier::REVERSED)
+                    .fg(Color::Yellow),
+            ),
+        area,
+        &mut list_state,
+    );
+}
+
+fn render_jump_floater(f: &mut Frame, jump: &JumpState) {
+    let area = centered_rect(50, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .title(" Jump to ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [input_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+
+    f.render_widget(
+        Paragraph::new(format!("path:{}{}", jump.input, "█")),
+        input_area,
+    );
+
+    let items: Vec<ListItem> = jump
+        .candidates
+        .iter()
+        .map(|c| ListItem::new(c.as_str()))
+        .collect();
+    let mut list_state = ListState::default();
+    list_state.select(if jump.candidates.is_empty() { None } else { Some(jump.sel) });
+    f.render_stateful_widget(
+        List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        list_area,
+        &mut list_state,
+    );
+}
+
+fn render_search_bar(f: &mut Frame, search: &SearchState) {
+    let area = f.area();
+    // Show inline at top of screen (y=0)
+    let search_area = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("path:{} > ", search.scope_path),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(search.query.as_str()),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ])),
+        search_area,
+    );
+}
+
+fn centered_rect(percent_x: u16, r: Rect) -> Rect {
+    let height = 12u16.min(r.height);
+    let y = r.y + r.height.saturating_sub(height) / 2;
+    let width = r.width * percent_x / 100;
+    let x = r.x + r.width.saturating_sub(width) / 2;
+    Rect { x, y, width, height }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
