@@ -60,6 +60,7 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
             ("e", "Edit"),
             ("d", "Delete"),
             ("i", "Import"),
+            ("f", "Folders"),
             ("q", "Quit"),
         ]
     };
