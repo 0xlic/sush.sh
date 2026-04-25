@@ -20,6 +20,38 @@ pub struct Metadata {
     pub ssh_config_hash: String,
     #[serde(default)]
     pub import_prompted: bool,
+    #[serde(default)]
+    pub secret_save_failures: Vec<SecretSaveFailure>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct SecretSaveFailure {
+    pub account: String,
+    pub reason: String,
+}
+
+impl Metadata {
+    pub fn upsert_secret_failure(&mut self, account: String, reason: String) {
+        if let Some(existing) = self
+            .secret_save_failures
+            .iter_mut()
+            .find(|failure| failure.account == account)
+        {
+            existing.reason = reason;
+            return;
+        }
+
+        self.secret_save_failures
+            .push(SecretSaveFailure { account, reason });
+    }
+
+    pub fn take_secret_failure(&mut self, account: &str) -> Option<SecretSaveFailure> {
+        let index = self
+            .secret_save_failures
+            .iter()
+            .position(|failure| failure.account == account)?;
+        Some(self.secret_save_failures.remove(index))
+    }
 }
 
 pub fn config_dir() -> PathBuf {
@@ -71,6 +103,7 @@ pub fn save_to(
         metadata: Metadata {
             ssh_config_hash: ssh_config_hash.to_string(),
             import_prompted,
+            secret_save_failures: vec![],
         },
         hosts: hosts.to_vec(),
     };
@@ -143,6 +176,57 @@ mod tests {
         std::fs::write(&path, "[metadata]\nssh_config_hash = \"abc\"\n").unwrap();
         let store = load_store(&path).unwrap();
         assert!(!store.metadata.import_prompted);
+    }
+
+    #[test]
+    fn secret_save_failures_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hosts.toml");
+
+        let metadata = Metadata {
+            ssh_config_hash: "abc".into(),
+            import_prompted: true,
+            secret_save_failures: vec![SecretSaveFailure {
+                account: "host-1:login_password".into(),
+                reason: "backend unavailable".into(),
+            }],
+        };
+
+        let store = HostStore {
+            metadata,
+            hosts: vec![],
+        };
+
+        std::fs::write(&path, toml::to_string_pretty(&store).unwrap()).unwrap();
+        let loaded = load_store(&path).unwrap();
+        assert_eq!(loaded.metadata.secret_save_failures.len(), 1);
+    }
+
+    #[test]
+    fn secret_save_failures_default_empty_on_old_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, "[metadata]\nssh_config_hash = \"abc\"\n").unwrap();
+        let loaded = load_store(&path).unwrap();
+        assert!(loaded.metadata.secret_save_failures.is_empty());
+    }
+
+    #[test]
+    fn upsert_secret_failure_overwrites_existing_reason() {
+        let mut metadata = Metadata::default();
+        metadata.upsert_secret_failure("host-1:login_password".into(), "first".into());
+        metadata.upsert_secret_failure("host-1:login_password".into(), "second".into());
+        assert_eq!(metadata.secret_save_failures.len(), 1);
+        assert_eq!(metadata.secret_save_failures[0].reason, "second");
+    }
+
+    #[test]
+    fn take_secret_failure_removes_matching_entry() {
+        let mut metadata = Metadata::default();
+        metadata.upsert_secret_failure("host-1:login_password".into(), "reason".into());
+        let failure = metadata.take_secret_failure("host-1:login_password");
+        assert_eq!(failure.unwrap().reason, "reason");
+        assert!(metadata.secret_save_failures.is_empty());
     }
 
     #[test]
