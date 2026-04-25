@@ -48,6 +48,7 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 **Zero friction SSH**
 - Reads `~/.ssh/config` automatically on startup — your hosts are already there
 - Fuzzy search across hostname, IP, user, tags, and description
+- Path-type tags build a virtual folder sidebar right inside the main view
 - Embedded terminal emulator: `vim`, `tmux`, `htop` all work correctly
 
 **Seamless SSH ↔ SFTP switching**
@@ -119,7 +120,11 @@ On first launch, `sush` will ask whether to import from `~/.ssh/config`. You can
 | `e` | Edit selected host |
 | `d` | Delete selected host |
 | `i` | Import from `~/.ssh/config` |
+| `f` | Toggle folder sidebar |
+| `j` | Jump to folder (when folders are focused) |
 | `q` | Quit |
+
+When the folder sidebar is visible, search is scoped to the current folder and the search box shows a read-only `path:/current/folder` prefix.
 
 **SSH mode**
 | Key | Action |
@@ -167,7 +172,7 @@ On first launch, `sush` will ask whether to import from `~/.ssh/config`. You can
 | **v0.2** ✅ | Embedded terminal emulator · TUI visible during SSH sessions |
 | **v0.3** ✅ | TUI host editor · tag chip editor · manual SSH config import |
 | **v0.4** ✅ | Connection history · recency-boosted search · TCP connectivity probe |
-| v0.5 | Path-type tags · virtual folder navigation |
+| **v0.5** ✅ | Path-type tags · main-view folder sidebar · folder jump · scoped `path:` search |
 | v0.6 | Credential encryption (master password) |
 | v0.7 | Recursive folder transfer · remote file editing · dual-pane SFTP |
 | v0.8 | Port forwarding · ProxyJump chains · SOCKS5 proxy |
