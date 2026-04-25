@@ -1,4 +1,5 @@
 pub mod edit_view;
+pub mod folder_view;
 pub mod import_view;
 pub mod main_view;
 pub mod password_dialog;
