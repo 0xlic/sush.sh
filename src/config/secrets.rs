@@ -128,7 +128,7 @@ impl SecretBackend for SystemSecretBackend {
             service: "sush".into(),
             account: "__availability_probe__".into(),
         };
-        matches!(self.get(&probe_key), Ok(_))
+        self.get(&probe_key).is_ok()
     }
 
     fn get(&self, key: &SecretKey) -> SecretResult<Option<String>> {

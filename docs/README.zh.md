@@ -150,8 +150,21 @@ sush
 `sush` 按以下顺序尝试认证：
 
 1. **ssh-agent** — 若 `SSH_AUTH_SOCK` 已设置，优先使用
-2. **IdentityFile** — 读取 `~/.ssh/config` 中的密钥路径；有密码保护时会在 TUI 弹出输入框
-3. **密码认证** — 所有方法失败后，在 TUI 中弹出密码输入框
+2. **IdentityFile** — 读取 `~/.ssh/config` 中的密钥路径；若私钥口令已保存在系统钥匙串，则优先读取，否则在 TUI 弹出输入框
+3. **密码认证** — 所有方法失败后，优先读取系统钥匙串中的登录密码；取不到时再在 TUI 弹出输入框
+
+首次手工输入成功后，`sush` 会静默尝试把以下凭证保存到系统原生安全存储：
+
+- 登录密码
+- 私钥口令
+
+不同系统使用各自的原生能力：
+
+- macOS：Keychain
+- Windows：Credential Manager
+- Linux：Secret Service
+
+如果 Linux 环境没有可用的 Secret Service，`sush` 不会回退到本地加密文件；凭证只用于当前连接，并在下次需要输入时提示安装 `gnome-keyring` 或 `kwallet`。
 
 ---
 
@@ -174,7 +187,7 @@ sush
 | **v0.3** ✅ | TUI 主机编辑 · chip 标签编辑器 · 手动 SSH config 导入 |
 | **v0.4** ✅ | 连接历史记录 · 近期加权搜索排序 · TCP 连通性探测 |
 | **v0.5** ✅ | path 类型标签 · 主界面目录栏 · 目录跳转 · `path:` 范围搜索 |
-| v0.6 | 凭证加密存储（master password） |
+| v0.6 | 系统钥匙串凭证存储（登录密码 · 私钥口令） |
 | v0.7 | 文件夹递归传输 · 远程文件编辑 · 双面板 SFTP |
 | v0.8 | 端口转发管理 · ProxyJump 多级跳板 · SOCKS5 代理 |
 | v1.0 | Homebrew/AUR/Scoop 分发 · man page · 全平台测试 |

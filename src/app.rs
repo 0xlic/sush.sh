@@ -11,7 +11,9 @@ use russh::ChannelMsg;
 
 use crate::config::history::ConnectionHistory;
 use crate::config::host::Host;
-use crate::config::secrets::{SecretError, SecretKey, SecretKind, SecretStore, SystemSecretBackend};
+use crate::config::secrets::{
+    SecretError, SecretKey, SecretKind, SecretStore, SystemSecretBackend,
+};
 use crate::config::store;
 use crate::sftp::client::{SftpClient, list_local};
 use crate::sftp::transfer::{TransferProgress, TransferState, download, upload};
@@ -883,12 +885,19 @@ impl App {
 
     fn password_prompt_title(&mut self, user: &str, hostname: &str, account: &str) -> String {
         let title = format!("Password for {}@{}: ", user, hostname);
-        let Some(failure) = self.metadata.take_secret_failure(account) else {
+        let Some(failure) = self
+            .metadata
+            .secret_save_failures
+            .iter()
+            .find(|failure| failure.account == account)
+        else {
             return title;
         };
 
-        self.save_hosts_to_disk();
-        format!("Password was not saved last time: {}\n{title}", failure.reason)
+        format!(
+            "Password was not saved last time: {}\n{title}",
+            failure.reason
+        )
     }
 
     fn record_secret_save_failure(&mut self, account: String, error: &SecretError) {
@@ -911,12 +920,19 @@ impl App {
 
     fn key_passphrase_prompt_title(&mut self, path: &str, account: &str) -> String {
         let title = format!("Key passphrase ({}): ", path);
-        let Some(failure) = self.metadata.take_secret_failure(account) else {
+        let Some(failure) = self
+            .metadata
+            .secret_save_failures
+            .iter()
+            .find(|failure| failure.account == account)
+        else {
             return title;
         };
 
-        self.save_hosts_to_disk();
-        format!("Password was not saved last time: {}\n{title}", failure.reason)
+        format!(
+            "Password was not saved last time: {}\n{title}",
+            failure.reason
+        )
     }
 
     fn handle_edit_input(&mut self, k: KeyEvent) {
@@ -1746,8 +1762,8 @@ impl App {
                 return Ok(session);
             }
 
-            let title =
-                self.key_passphrase_prompt_title(identity_hint.as_str(), &key_passphrase_key.account);
+            let title = self
+                .key_passphrase_prompt_title(identity_hint.as_str(), &key_passphrase_key.account);
             if let Some(pass) = self.prompt_password(terminal, bus, &title).await?
                 && try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
                     .await
@@ -1755,8 +1771,9 @@ impl App {
             {
                 match self.secret_store.set(&key_passphrase_key, &pass) {
                     Ok(()) => self.clear_secret_save_failure(&key_passphrase_key.account),
-                    Err(error) => self
-                        .record_secret_save_failure(key_passphrase_key.account.clone(), &error),
+                    Err(error) => {
+                        self.record_secret_save_failure(key_passphrase_key.account.clone(), &error)
+                    }
                 }
                 return Ok(session);
             }

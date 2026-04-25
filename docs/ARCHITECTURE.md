@@ -248,6 +248,20 @@ struct ActiveSession {
   └── 失败 → 调用层输出错误并保持在主界面
 ```
 
+v0.6 起，登录密码和私钥口令都优先从系统安全存储读取：
+
+- macOS 使用 Keychain
+- Windows 使用 Credential Manager
+- Linux 使用 Secret Service
+
+凭证不会写入 `hosts.toml`。只有认证成功后，`App` 才会静默尝试把本次手工输入的登录密码或私钥口令保存到系统钥匙串；保存失败不会影响当前连接，只会把失败原因写入本地 metadata，供下次再次输入时提示。
+
+Linux 若没有可用的 Secret Service：
+
+- 禁止保存凭证
+- 允许本次临时输入继续连接
+- 下次输入时提示安装 `gnome-keyring` 或 `kwallet`
+
 #### `sftp/transfer.rs` — 文件传输
 
 ```rust
