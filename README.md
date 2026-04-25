@@ -173,7 +173,7 @@ When the folder sidebar is visible, search is scoped to the current folder and t
 | **v0.3** ✅ | TUI host editor · tag chip editor · manual SSH config import |
 | **v0.4** ✅ | Connection history · recency-boosted search · TCP connectivity probe |
 | **v0.5** ✅ | Path-type tags · main-view folder sidebar · folder jump · scoped `path:` search |
-| v0.6 | Credential encryption (master password) |
+| **v0.6** ✅ | System keyring credential storage · silent save after successful auth · temporary input only when Secret Service is unavailable |
 | v0.7 | Recursive folder transfer · remote file editing · dual-pane SFTP |
 | v0.8 | Port forwarding · ProxyJump chains · SOCKS5 proxy |
 | v1.0 | Homebrew/AUR/Scoop · man page · full platform testing |

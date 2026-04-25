@@ -187,7 +187,7 @@ sush
 | **v0.3** ✅ | TUI 主机编辑 · chip 标签编辑器 · 手动 SSH config 导入 |
 | **v0.4** ✅ | 连接历史记录 · 近期加权搜索排序 · TCP 连通性探测 |
 | **v0.5** ✅ | path 类型标签 · 主界面目录栏 · 目录跳转 · `path:` 范围搜索 |
-| v0.6 | 系统钥匙串凭证存储 · 认证成功后静默保存 · Linux 无 Secret Service 时仅临时输入 |
+| **v0.6** ✅ | 系统钥匙串凭证存储 · 认证成功后静默保存 · Linux 无 Secret Service 时仅临时输入 |
 | v0.7 | 文件夹递归传输 · 远程文件编辑 · 双面板 SFTP |
 | v0.8 | 端口转发管理 · ProxyJump 多级跳板 · SOCKS5 代理 |
 | v1.0 | Homebrew/AUR/Scoop 分发 · man page · 全平台测试 |
