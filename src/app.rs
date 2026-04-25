@@ -11,7 +11,7 @@ use russh::ChannelMsg;
 
 use crate::config::history::ConnectionHistory;
 use crate::config::host::Host;
-use crate::config::secrets::{SecretStore, SystemSecretBackend};
+use crate::config::secrets::{SecretError, SecretKey, SecretKind, SecretStore, SystemSecretBackend};
 use crate::config::store;
 use crate::sftp::client::{SftpClient, list_local};
 use crate::sftp::transfer::{TransferProgress, TransferState, download, upload};
@@ -881,6 +881,38 @@ impl App {
         );
     }
 
+    fn password_prompt_title(&mut self, user: &str, hostname: &str, account: &str) -> String {
+        let title = format!("Password for {}@{}: ", user, hostname);
+        let Some(failure) = self
+            .metadata
+            .secret_save_failures
+            .iter()
+            .find(|failure| failure.account == account)
+        else {
+            return title;
+        };
+
+        format!("Password was not saved last time: {}\n{title}", failure.reason)
+    }
+
+    fn record_secret_save_failure(&mut self, account: String, error: &SecretError) {
+        let mut reason = error.user_message().to_string();
+        if cfg!(target_os = "linux") && matches!(error, SecretError::Unavailable(_)) {
+            reason.push_str(
+                ". Install and unlock a Secret Service provider such as gnome-keyring or kwallet.",
+            );
+        }
+
+        self.metadata.upsert_secret_failure(account, reason);
+        self.save_hosts_to_disk();
+    }
+
+    fn clear_secret_save_failure(&mut self, account: &str) {
+        if self.metadata.take_secret_failure(account).is_some() {
+            self.save_hosts_to_disk();
+        }
+    }
+
     fn handle_edit_input(&mut self, k: KeyEvent) {
         let Some(draft) = self.edit_draft.as_mut() else {
             return;
@@ -1704,7 +1736,19 @@ impl App {
             }
         }
 
-        let title = format!("Password for {}@{}: ", host.user, host.hostname);
+        let password_key = SecretKey::new(&host.id, SecretKind::LoginPassword, None);
+        if let Ok(Some(pass)) = self.secret_store.get(&password_key) {
+            let ok = session
+                .handle
+                .authenticate_password(&host.user, &pass)
+                .await?
+                .success();
+            if ok {
+                return Ok(session);
+            }
+        }
+
+        let title = self.password_prompt_title(&host.user, &host.hostname, &password_key.account);
         if let Some(pass) = self.prompt_password(terminal, bus, &title).await? {
             let ok = session
                 .handle
@@ -1712,6 +1756,12 @@ impl App {
                 .await?
                 .success();
             if ok {
+                match self.secret_store.set(&password_key, &pass) {
+                    Ok(()) => self.clear_secret_save_failure(&password_key.account),
+                    Err(error) => {
+                        self.record_secret_save_failure(password_key.account.clone(), &error)
+                    }
+                }
                 return Ok(session);
             }
         }
@@ -2219,6 +2269,33 @@ mod tests {
         assert_eq!(
             app.metadata.secret_save_failures[0].account,
             "host-1:login_password"
+        );
+    }
+
+    #[test]
+    fn password_prompt_title_includes_previous_save_failure_reason() {
+        let mut app = app_with_metadata_failures();
+        let title =
+            app.password_prompt_title("deploy", "prod.example.com", "host-1:login_password");
+        assert!(title.contains("Password was not saved last time"));
+        assert!(title.contains("system keyring is unavailable"));
+        assert!(title.contains("Password for deploy@prod.example.com:"));
+    }
+
+    #[test]
+    fn record_secret_save_failure_stores_user_message() {
+        let mut app = app_with(vec![]);
+        app.record_secret_save_failure(
+            "host-1:login_password".into(),
+            &crate::config::secrets::SecretError::Unavailable(
+                "linux secret service not found".into(),
+            ),
+        );
+        assert_eq!(app.metadata.secret_save_failures.len(), 1);
+        assert!(
+            app.metadata.secret_save_failures[0]
+                .reason
+                .contains("system keyring is unavailable")
         );
     }
 }
