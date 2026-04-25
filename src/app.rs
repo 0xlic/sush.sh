@@ -1065,12 +1065,152 @@ impl App {
         }
     }
 
-    fn handle_folder_jump_key(&mut self, _k: KeyEvent) {
-        // Implemented in Task 5
+    fn handle_folder_jump_key(&mut self, k: KeyEvent) {
+        let Some(fv) = self.folder_view_state.as_mut() else {
+            return;
+        };
+
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => {
+                fv.jump = None;
+            }
+
+            (KeyCode::Backspace, _) => {
+                if let Some(jump) = fv.jump.as_mut() {
+                    jump.input.pop();
+                    let q = jump.input.clone();
+                    jump.candidates = jump_candidates(&q, &fv.tree);
+                    jump.sel = 0;
+                }
+            }
+
+            (KeyCode::Up, _) => {
+                if let Some(jump) = fv.jump.as_mut()
+                    && jump.sel > 0
+                {
+                    jump.sel -= 1;
+                }
+            }
+
+            (KeyCode::Down, _) => {
+                if let Some(jump) = fv.jump.as_mut()
+                    && !jump.candidates.is_empty()
+                {
+                    jump.sel = (jump.sel + 1).min(jump.candidates.len() - 1);
+                }
+            }
+
+            (KeyCode::Tab, _) => {
+                // Path completion: fill input with highlighted candidate
+                let candidate = fv
+                    .jump
+                    .as_ref()
+                    .and_then(|j| j.candidates.get(j.sel))
+                    .cloned();
+                if let Some(candidate) = candidate
+                    && let Some(jump) = fv.jump.as_mut()
+                {
+                    jump.input = candidate.clone();
+                    jump.candidates = jump_candidates(&candidate, &fv.tree);
+                    jump.sel = 0;
+                }
+            }
+
+            (KeyCode::Enter, _) => {
+                // Clone target before re-borrowing fv to avoid borrow conflict
+                let target = fv
+                    .jump
+                    .as_ref()
+                    .and_then(|j| j.candidates.get(j.sel))
+                    .cloned();
+                if let Some(target) = target {
+                    fv.jump_to(&target);
+                    self.refresh_folder_hosts();
+                } else {
+                    if let Some(fv) = self.folder_view_state.as_mut() {
+                        fv.jump = None;
+                    }
+                }
+            }
+
+            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                if let Some(jump) = fv.jump.as_mut() {
+                    jump.input.push(c);
+                    let q = jump.input.clone();
+                    jump.candidates = jump_candidates(&q, &fv.tree);
+                    jump.sel = 0;
+                }
+            }
+
+            _ => {}
+        }
     }
 
-    fn handle_folder_search_key(&mut self, _k: KeyEvent) {
-        // Implemented in Task 6
+    fn handle_folder_search_key(&mut self, k: KeyEvent) {
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => {
+                if let Some(fv) = self.folder_view_state.as_mut() {
+                    fv.search = None;
+                }
+                self.refresh_folder_hosts();
+            }
+
+            (KeyCode::Enter, _) => {
+                if let Some(fv) = self.folder_view_state.as_mut() {
+                    fv.search = None;
+                }
+                // Keep current filtered results
+            }
+
+            (KeyCode::Backspace, _) => {
+                if let Some(fv) = self.folder_view_state.as_mut()
+                    && let Some(search) = fv.search.as_mut()
+                {
+                    search.query.pop();
+                }
+                self.apply_scoped_search();
+            }
+
+            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                if let Some(fv) = self.folder_view_state.as_mut()
+                    && let Some(search) = fv.search.as_mut()
+                {
+                    search.query.push(c);
+                }
+                self.apply_scoped_search();
+            }
+
+            _ => {}
+        }
+    }
+
+    fn apply_scoped_search(&mut self) {
+        let Some(fv) = &self.folder_view_state else {
+            return;
+        };
+        let Some(search) = &fv.search else {
+            self.refresh_folder_hosts();
+            return;
+        };
+
+        let scope = search.scope_path.clone();
+        let query = search.query.clone();
+
+        let path_indices = hosts_in_path(&scope, &self.hosts);
+
+        if query.is_empty() {
+            self.folder_host_indices = path_indices;
+            return;
+        }
+
+        // Build a scoped sub-list, fuzzy-search within it, map results back to original indices
+        let scoped: Vec<(usize, crate::config::host::Host)> = path_indices
+            .iter()
+            .map(|&i| (i, self.hosts[i].clone()))
+            .collect();
+        let sub_hosts: Vec<crate::config::host::Host> = scoped.iter().map(|(_, h)| h.clone()).collect();
+        let fuzzy_results = crate::utils::fuzzy::search(&query, &sub_hosts, &self.connection_history);
+        self.folder_host_indices = fuzzy_results.into_iter().map(|fi| scoped[fi].0).collect();
     }
 
     fn handle_import_input(&mut self, k: KeyEvent) {
