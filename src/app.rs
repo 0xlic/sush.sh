@@ -11,6 +11,7 @@ use russh::ChannelMsg;
 
 use crate::config::history::ConnectionHistory;
 use crate::config::host::Host;
+use crate::config::secrets::{SecretStore, SystemSecretBackend};
 use crate::config::store;
 use crate::sftp::client::{SftpClient, list_local};
 use crate::sftp::transfer::{TransferProgress, TransferState, download, upload};
@@ -104,6 +105,7 @@ pub struct App {
     pub import_state: Option<ImportViewState>,
     pub confirm_delete: bool,
     pub import_prompted: bool,
+    pub metadata: store::Metadata,
     pub connection_history: ConnectionHistory,
     pub hover_host_id: Option<String>,
     pub hover_since: Option<Instant>,
@@ -113,6 +115,7 @@ pub struct App {
     pub show_import_prompt: bool,
     pub folder_view_state: Option<FolderViewState>,
     pub folder_host_indices: Vec<usize>,
+    secret_store: SecretStore,
     pwd_dialog: Option<PwdDialog>,
 }
 
@@ -120,7 +123,8 @@ impl App {
     pub fn new() -> Result<Self> {
         let store = store::load_store(&store::config_path())?;
         let hosts = store.hosts;
-        let import_prompted = store.metadata.import_prompted;
+        let metadata = store.metadata;
+        let import_prompted = metadata.import_prompted;
         let history_path = store::config_dir().join("history.toml");
         let connection_history = ConnectionHistory::load(history_path);
 
@@ -161,6 +165,7 @@ impl App {
             import_state: None,
             confirm_delete: false,
             import_prompted,
+            metadata,
             connection_history,
             hover_host_id: None,
             hover_since: None,
@@ -170,6 +175,7 @@ impl App {
             show_import_prompt: false,
             folder_view_state: None,
             folder_host_indices: vec![],
+            secret_store: SecretStore::new(Box::new(SystemSecretBackend::new())),
             pwd_dialog: None,
         })
     }
@@ -864,7 +870,15 @@ impl App {
     }
 
     fn save_hosts_to_disk(&self) {
-        let _ = store::save_to(&store::config_path(), &self.hosts, "", self.import_prompted);
+        let mut metadata = self.metadata.clone();
+        metadata.import_prompted = self.import_prompted;
+        let _ = store::save_store(
+            &store::config_path(),
+            &store::HostStore {
+                metadata,
+                hosts: self.hosts.clone(),
+            },
+        );
     }
 
     fn handle_edit_input(&mut self, k: KeyEvent) {
@@ -2087,6 +2101,8 @@ mod tests {
     use super::*;
     use crate::config::history::ConnectionHistory;
     use crate::config::host::{Host, HostSource};
+    use crate::config::secrets::{FakeBackend, SecretStore};
+    use crate::config::store::{Metadata, SecretSaveFailure};
 
     fn app_with(hosts: Vec<Host>) -> App {
         App {
@@ -2120,6 +2136,7 @@ mod tests {
             import_state: None,
             confirm_delete: false,
             import_prompted: false,
+            metadata: Metadata::default(),
             connection_history: ConnectionHistory::load(std::path::PathBuf::from(
                 "/tmp/sush-test-history.toml",
             )),
@@ -2131,8 +2148,23 @@ mod tests {
             show_import_prompt: false,
             folder_view_state: None,
             folder_host_indices: vec![],
+            secret_store: SecretStore::new(Box::new(FakeBackend::available())),
             pwd_dialog: None,
         }
+    }
+
+    fn app_with_metadata_failures() -> App {
+        let mut app = app_with(vec![]);
+        app.metadata = Metadata {
+            ssh_config_hash: String::new(),
+            import_prompted: false,
+            secret_save_failures: vec![SecretSaveFailure {
+                account: "host-1:login_password".into(),
+                reason: "system keyring is unavailable".into(),
+            }],
+        };
+        app.secret_store = SecretStore::new(Box::new(FakeBackend::available()));
+        app
     }
 
     fn mk(id: &str) -> Host {
@@ -2178,5 +2210,15 @@ mod tests {
         let (forward, switched) = split_ssh_input(b"ls\x1c", SWITCH_SEQ);
         assert_eq!(forward, b"ls");
         assert!(switched);
+    }
+
+    #[test]
+    fn app_test_helper_carries_secret_failure_metadata() {
+        let app = app_with_metadata_failures();
+        assert_eq!(app.metadata.secret_save_failures.len(), 1);
+        assert_eq!(
+            app.metadata.secret_save_failures[0].account,
+            "host-1:login_password"
+        );
     }
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::host::Host;
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct HostStore {
     #[serde(default)]
     pub metadata: Metadata,
@@ -14,7 +14,7 @@ pub struct HostStore {
     pub hosts: Vec<Host>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Metadata {
     #[serde(default)]
     pub ssh_config_hash: String,
@@ -96,17 +96,23 @@ pub fn save_to(
     ssh_config_hash: &str,
     import_prompted: bool,
 ) -> Result<()> {
+    save_store(
+        path,
+        &HostStore {
+            metadata: Metadata {
+                ssh_config_hash: ssh_config_hash.to_string(),
+                import_prompted,
+                secret_save_failures: vec![],
+            },
+            hosts: hosts.to_vec(),
+        },
+    )
+}
+
+pub fn save_store(path: &Path, store: &HostStore) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let store = HostStore {
-        metadata: Metadata {
-            ssh_config_hash: ssh_config_hash.to_string(),
-            import_prompted,
-            secret_save_failures: vec![],
-        },
-        hosts: hosts.to_vec(),
-    };
     let content = toml::to_string_pretty(&store)?;
     fs::write(path, content)?;
     Ok(())
