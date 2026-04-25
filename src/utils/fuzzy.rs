@@ -138,10 +138,7 @@ mod tests {
 
     #[test]
     fn matches_tag() {
-        let hosts = vec![
-            make("a", "x", "u", &["web"]),
-            make("b", "y", "u", &["db"]),
-        ];
+        let hosts = vec![make("a", "x", "u", &["web"]), make("b", "y", "u", &["db"])];
         let history = empty_history();
         let result = search("db", &hosts, &history);
         assert!(result.contains(&1));

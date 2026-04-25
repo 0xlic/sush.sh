@@ -77,20 +77,41 @@ impl FolderViewState {
     /// The path whose hosts should be shown in the Hosts column.
     pub fn focused_path(&self) -> &str {
         match self.focus {
-            FolderFocus::DirA => self.col_a.get(self.sel_a).map(|s| s.as_str()).unwrap_or("/"),
+            FolderFocus::DirA => self
+                .col_a
+                .get(self.sel_a)
+                .map(|s| s.as_str())
+                .unwrap_or("/"),
             FolderFocus::DirB | FolderFocus::Hosts => {
                 if !self.col_b.is_empty() {
-                    self.col_b.get(self.sel_b).map(|s| s.as_str()).unwrap_or("/")
+                    self.col_b
+                        .get(self.sel_b)
+                        .map(|s| s.as_str())
+                        .unwrap_or("/")
                 } else {
-                    self.col_a.get(self.sel_a).map(|s| s.as_str()).unwrap_or("/")
+                    self.col_a
+                        .get(self.sel_a)
+                        .map(|s| s.as_str())
+                        .unwrap_or("/")
                 }
             }
         }
     }
 
+    pub fn selected_path(&self) -> &str {
+        self.col_a
+            .get(self.sel_a)
+            .map(|s| s.as_str())
+            .unwrap_or("/")
+    }
+
     /// Recompute col_b from the current col_a selection.
     pub fn update_col_b(&mut self) {
-        let selected = self.col_a.get(self.sel_a).cloned().unwrap_or_else(|| "/".into());
+        let selected = self
+            .col_a
+            .get(self.sel_a)
+            .cloned()
+            .unwrap_or_else(|| "/".into());
         self.col_b = self
             .tree
             .get(&selected)
@@ -101,6 +122,16 @@ impl FolderViewState {
 
     /// Jump to a specific path: rebuild col_a as the siblings, col_b as children.
     pub fn jump_to(&mut self, path: &str) {
+        if path == "/" {
+            self.col_a = level_1_paths(&self.tree);
+            self.sel_a = self.col_a.iter().position(|p| p == "/").unwrap_or(0);
+            self.update_col_b();
+            self.depth = 0;
+            self.focus = FolderFocus::DirA;
+            self.jump = None;
+            return;
+        }
+
         let parent = parent_path(path);
         self.col_a = self
             .tree
@@ -109,6 +140,7 @@ impl FolderViewState {
             .unwrap_or_else(|| level_1_paths(&self.tree));
         self.sel_a = self.col_a.iter().position(|p| p == path).unwrap_or(0);
         self.update_col_b();
+        self.depth = path_depth(path).saturating_sub(1);
         self.focus = FolderFocus::DirA;
         self.jump = None;
     }
@@ -148,7 +180,11 @@ fn ensure_path(tree: &mut HashMap<String, FolderNode>, path: &str) {
 
     tree.insert(
         path.to_string(),
-        FolderNode { path: path.to_string(), name, children: vec![] },
+        FolderNode {
+            path: path.to_string(),
+            name,
+            children: vec![],
+        },
     );
 
     let parent = parent_path(path);
@@ -166,6 +202,14 @@ pub fn parent_path(path: &str) -> String {
     match trimmed.rfind('/') {
         None | Some(0) => "/".to_string(),
         Some(i) => trimmed[..i].to_string(),
+    }
+}
+
+fn path_depth(path: &str) -> usize {
+    if path == "/" {
+        0
+    } else {
+        path.trim_start_matches('/').split('/').count()
     }
 }
 
@@ -192,7 +236,11 @@ pub fn level_1_paths(tree: &HashMap<String, FolderNode>) -> Vec<String> {
 /// "/" returns hosts with no path tags at all.
 #[allow(dead_code)]
 pub fn hosts_in_path(path: &str, hosts: &[Host]) -> Vec<usize> {
-    let prefix = if path == "/" { None } else { Some(format!("{path}/")) };
+    let prefix = if path == "/" {
+        None
+    } else {
+        Some(format!("{path}/"))
+    };
     hosts
         .iter()
         .enumerate()
@@ -267,8 +315,22 @@ pub fn render(
     ])
     .areas(content_area);
 
-    render_dir_col(f, col_a_area, &state.col_a, state.sel_a, state.focus == FolderFocus::DirA, &state.tree);
-    render_dir_col(f, col_b_area, &state.col_b, state.sel_b, state.focus == FolderFocus::DirB, &state.tree);
+    render_dir_col(
+        f,
+        col_a_area,
+        &state.col_a,
+        state.sel_a,
+        state.focus == FolderFocus::DirA,
+        &state.tree,
+    );
+    render_dir_col(
+        f,
+        col_b_area,
+        &state.col_b,
+        state.sel_b,
+        state.focus == FolderFocus::DirB,
+        &state.tree,
+    );
 
     let mut host_list_state = ListState::default();
     if !host_indices.is_empty() {
@@ -279,6 +341,7 @@ pub fn render(
             hosts,
             indices: host_indices,
             focused: state.focus == FolderFocus::Hosts,
+            show_selection: state.focus == FolderFocus::Hosts,
             probe,
             status_msg: None,
         },
@@ -345,13 +408,11 @@ fn render_dir_col(
     list_state.select(Some(sel));
 
     f.render_stateful_widget(
-        List::new(items)
-            .block(block)
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::REVERSED)
-                    .fg(Color::Yellow),
-            ),
+        List::new(items).block(block).highlight_style(
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .fg(Color::Yellow),
+        ),
         area,
         &mut list_state,
     );
@@ -381,7 +442,11 @@ fn render_jump_floater(f: &mut Frame, jump: &JumpState) {
         .map(|c| ListItem::new(c.as_str()))
         .collect();
     let mut list_state = ListState::default();
-    list_state.select(if jump.candidates.is_empty() { None } else { Some(jump.sel) });
+    list_state.select(if jump.candidates.is_empty() {
+        None
+    } else {
+        Some(jump.sel)
+    });
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
         list_area,
@@ -416,7 +481,12 @@ fn centered_rect(percent_x: u16, r: Rect) -> Rect {
     let y = r.y + r.height.saturating_sub(height) / 2;
     let width = r.width * percent_x / 100;
     let x = r.x + r.width.saturating_sub(width) / 2;
-    Rect { x, y, width, height }
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]

@@ -31,6 +31,7 @@ use crate::tui::widgets::confirm_dialog::ConfirmDialog;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainFocus {
     HostList,
+    Directory,
     Search,
 }
 
@@ -41,6 +42,7 @@ pub enum AppMode {
     Sftp,
     Edit,
     ImportSshConfig,
+    #[allow(dead_code)]
     FolderView,
 }
 
@@ -78,6 +80,8 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     pub should_quit: bool,
     pub main_focus: MainFocus,
+    main_focus_before_search: MainFocus,
+    pub show_folder_sidebar: bool,
     pub list_state: ListState,
     pub trigger_connect: bool,
     pub trigger_sftp: bool,
@@ -133,6 +137,8 @@ impl App {
             filtered_indices,
             should_quit: false,
             main_focus: MainFocus::HostList,
+            main_focus_before_search: MainFocus::HostList,
+            show_folder_sidebar: false,
             list_state,
             trigger_connect: false,
             trigger_sftp: false,
@@ -392,7 +398,9 @@ impl App {
             // Start probe after 1s hover, if none is running or completed.
             if self.probe_rx.is_none()
                 && self.probe_result.is_none()
-                && self.hover_since.is_some_and(|s| s.elapsed() >= std::time::Duration::from_secs(1))
+                && self
+                    .hover_since
+                    .is_some_and(|s| s.elapsed() >= std::time::Duration::from_secs(1))
                 && let Some(&idx) = self
                     .filtered_indices
                     .get(self.list_state.selected().unwrap_or(0))
@@ -495,16 +503,42 @@ impl App {
         }
     }
 
+    pub fn folder_search_prefix(&self) -> Option<&str> {
+        self.show_folder_sidebar
+            .then(|| {
+                self.folder_view_state
+                    .as_ref()
+                    .map(FolderViewState::selected_path)
+            })
+            .flatten()
+    }
+
     fn handle_main_key(&mut self, k: KeyEvent) {
+        if self.main_focus == MainFocus::Directory
+            && self
+                .folder_view_state
+                .as_ref()
+                .and_then(|fv| fv.jump.as_ref())
+                .is_some()
+        {
+            self.handle_folder_jump_key(k);
+            return;
+        }
+
         match self.main_focus {
             MainFocus::HostList => self.handle_main_key_hostlist(k),
+            MainFocus::Directory => self.handle_main_key_directory(k),
             MainFocus::Search => self.handle_main_key_search(k),
         }
     }
 
     fn handle_main_key_hostlist(&mut self, k: KeyEvent) {
         match (k.code, k.modifiers) {
-            (KeyCode::Tab, _) | (KeyCode::Char('/'), KeyModifiers::NONE) => {
+            (KeyCode::Tab, _) if self.show_folder_sidebar => {
+                self.main_focus = MainFocus::Directory;
+            }
+            (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                self.main_focus_before_search = MainFocus::HostList;
                 self.main_focus = MainFocus::Search;
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
@@ -541,10 +575,45 @@ impl App {
                 self.open_import_view();
             }
             (KeyCode::Char('f'), KeyModifiers::NONE) => {
-                let fv = FolderViewState::new(&self.hosts);
-                self.folder_host_indices = hosts_in_path(fv.focused_path(), &self.hosts);
-                self.folder_view_state = Some(fv);
-                self.mode = AppMode::FolderView;
+                self.toggle_folder_sidebar();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_main_key_directory(&mut self, k: KeyEvent) {
+        match (k.code, k.modifiers) {
+            (KeyCode::Tab, _) => {
+                self.main_focus = MainFocus::HostList;
+            }
+            (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                self.main_focus_before_search = MainFocus::Directory;
+                self.main_focus = MainFocus::Search;
+            }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                self.toggle_folder_sidebar();
+            }
+            (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                if let Some(fv) = self.folder_view_state.as_mut() {
+                    let candidates = jump_candidates("", &fv.tree);
+                    fv.jump = Some(JumpState {
+                        input: String::new(),
+                        candidates,
+                        sel: 0,
+                    });
+                }
+            }
+            (KeyCode::Enter, _) | (KeyCode::Right, _) => {
+                self.directory_enter();
+            }
+            (KeyCode::Backspace, _) | (KeyCode::Left, _) => {
+                self.directory_back();
+            }
+            (KeyCode::Up, _) => {
+                self.directory_select_previous();
+            }
+            (KeyCode::Down, _) => {
+                self.directory_select_next();
             }
             _ => {}
         }
@@ -553,7 +622,7 @@ impl App {
     fn handle_main_key_search(&mut self, k: KeyEvent) {
         match (k.code, k.modifiers) {
             (KeyCode::Tab, _) | (KeyCode::Esc, _) | (KeyCode::Enter, _) => {
-                self.main_focus = MainFocus::HostList;
+                self.main_focus = self.main_focus_before_search;
             }
             (KeyCode::Up, _) => self.select_previous(),
             (KeyCode::Down, _) => self.select_next(),
@@ -641,11 +710,24 @@ impl App {
     }
 
     fn apply_search(&mut self) {
-        self.filtered_indices = crate::utils::fuzzy::search(
+        let scoped_indices = if self.show_folder_sidebar {
+            self.folder_search_prefix()
+                .map(|path| hosts_in_path(path, &self.hosts))
+                .unwrap_or_default()
+        } else {
+            (0..self.hosts.len()).collect()
+        };
+
+        let scoped_hosts: Vec<Host> = scoped_indices
+            .iter()
+            .map(|&idx| self.hosts[idx].clone())
+            .collect();
+        let result = crate::utils::fuzzy::search(
             &self.search_query,
-            &self.hosts,
+            &scoped_hosts,
             &self.connection_history,
         );
+        self.filtered_indices = result.into_iter().map(|i| scoped_indices[i]).collect();
         let sel = if self.filtered_indices.is_empty() {
             None
         } else {
@@ -653,6 +735,97 @@ impl App {
         };
         self.list_state.select(sel);
         self.on_selection_changed();
+    }
+
+    fn toggle_folder_sidebar(&mut self) {
+        if self.show_folder_sidebar {
+            self.show_folder_sidebar = false;
+            if self.main_focus == MainFocus::Directory {
+                self.main_focus = MainFocus::HostList;
+            }
+            if self.main_focus_before_search == MainFocus::Directory {
+                self.main_focus_before_search = MainFocus::HostList;
+            }
+        } else {
+            if self.folder_view_state.is_none() {
+                self.folder_view_state = Some(FolderViewState::new(&self.hosts));
+            }
+            if let Some(fv) = self.folder_view_state.as_mut() {
+                fv.jump = None;
+            }
+            self.show_folder_sidebar = true;
+            self.main_focus = MainFocus::Directory;
+        }
+        self.apply_search();
+    }
+
+    fn directory_select_previous(&mut self) {
+        if let Some(fv) = self.folder_view_state.as_mut() {
+            if fv.sel_a > 0 {
+                fv.sel_a -= 1;
+            }
+            fv.update_col_b();
+        }
+        self.apply_search();
+    }
+
+    fn directory_select_next(&mut self) {
+        if let Some(fv) = self.folder_view_state.as_mut() {
+            if fv.sel_a + 1 < fv.col_a.len() {
+                fv.sel_a += 1;
+            }
+            fv.update_col_b();
+        }
+        self.apply_search();
+    }
+
+    fn directory_enter(&mut self) {
+        if let Some(fv) = self.folder_view_state.as_mut() {
+            let selected = fv.selected_path().to_string();
+            let children = fv
+                .tree
+                .get(&selected)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+            if !children.is_empty() {
+                fv.col_a = children;
+                fv.sel_a = 0;
+                fv.depth += 1;
+                fv.update_col_b();
+            }
+        }
+        self.apply_search();
+    }
+
+    fn directory_back(&mut self) {
+        if let Some(fv) = self.folder_view_state.as_mut() {
+            let current = fv.selected_path().to_string();
+            if current == "/" {
+                return;
+            }
+
+            let parent = parent_path(&current);
+            if parent == "/" {
+                fv.col_a = level_1_paths(&fv.tree);
+                fv.sel_a = fv.col_a.iter().position(|path| path == "/").unwrap_or(0);
+                fv.depth = 0;
+            } else {
+                let grandparent = parent_path(&parent);
+                fv.col_a = fv
+                    .tree
+                    .get(&grandparent)
+                    .map(|node| node.children.clone())
+                    .unwrap_or_else(|| level_1_paths(&fv.tree));
+                fv.sel_a = fv
+                    .col_a
+                    .iter()
+                    .position(|path| path == &parent)
+                    .unwrap_or(0);
+                fv.depth = fv.depth.saturating_sub(1);
+            }
+            fv.update_col_b();
+        }
+        self.apply_search();
     }
 
     fn set_status(&mut self, msg: String) {
@@ -880,13 +1053,20 @@ impl App {
             (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 let fv = self.folder_view_state.as_mut().unwrap();
                 let all_cands = jump_candidates("", &fv.tree);
-                fv.jump = Some(JumpState { input: String::new(), candidates: all_cands, sel: 0 });
+                fv.jump = Some(JumpState {
+                    input: String::new(),
+                    candidates: all_cands,
+                    sel: 0,
+                });
             }
 
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
                 let fv = self.folder_view_state.as_mut().unwrap();
                 let scope = fv.focused_path().to_string();
-                fv.search = Some(SearchState { scope_path: scope, query: String::new() });
+                fv.search = Some(SearchState {
+                    scope_path: scope,
+                    query: String::new(),
+                });
             }
 
             (KeyCode::Up, _) => {
@@ -973,7 +1153,8 @@ impl App {
                             self.folder_view_state = None;
                             self.mode = AppMode::Main;
                             self.trigger_connect = true;
-                            if let Some(pos) = self.filtered_indices.iter().position(|&i| i == idx) {
+                            if let Some(pos) = self.filtered_indices.iter().position(|&i| i == idx)
+                            {
                                 self.list_state.select(Some(pos));
                             }
                         }
@@ -1125,7 +1306,11 @@ impl App {
                     .cloned();
                 if let Some(target) = target {
                     fv.jump_to(&target);
-                    self.refresh_folder_hosts();
+                    if self.mode == AppMode::Main {
+                        self.apply_search();
+                    } else {
+                        self.refresh_folder_hosts();
+                    }
                 } else {
                     if let Some(fv) = self.folder_view_state.as_mut() {
                         fv.jump = None;
@@ -1208,8 +1393,10 @@ impl App {
             .iter()
             .map(|&i| (i, self.hosts[i].clone()))
             .collect();
-        let sub_hosts: Vec<crate::config::host::Host> = scoped.iter().map(|(_, h)| h.clone()).collect();
-        let fuzzy_results = crate::utils::fuzzy::search(&query, &sub_hosts, &self.connection_history);
+        let sub_hosts: Vec<crate::config::host::Host> =
+            scoped.iter().map(|(_, h)| h.clone()).collect();
+        let fuzzy_results =
+            crate::utils::fuzzy::search(&query, &sub_hosts, &self.connection_history);
         self.folder_host_indices = fuzzy_results.into_iter().map(|fi| scoped[fi].0).collect();
     }
 
@@ -1909,6 +2096,8 @@ mod tests {
             filtered_indices: vec![],
             should_quit: false,
             main_focus: MainFocus::HostList,
+            main_focus_before_search: MainFocus::HostList,
+            show_folder_sidebar: false,
             list_state: ListState::default(),
             trigger_connect: false,
             trigger_sftp: false,
@@ -1931,7 +2120,9 @@ mod tests {
             import_state: None,
             confirm_delete: false,
             import_prompted: false,
-            connection_history: ConnectionHistory::load(std::path::PathBuf::from("/tmp/sush-test-history.toml")),
+            connection_history: ConnectionHistory::load(std::path::PathBuf::from(
+                "/tmp/sush-test-history.toml",
+            )),
             hover_host_id: None,
             hover_since: None,
             probe_rx: None,
