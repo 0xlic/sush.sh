@@ -20,7 +20,10 @@ use crate::ssh::session::{ActiveSession, try_key_auth};
 use crate::ssh::terminal::TerminalEmulator;
 use crate::tui::event::{AppEvent, EventBus};
 use crate::tui::views::edit_view::{self, EditDraft, EditField};
-use crate::tui::views::folder_view::{self, FolderViewState, hosts_in_path};
+use crate::tui::views::folder_view::{
+    self, FolderFocus, FolderViewState, JumpState, SearchState, hosts_in_path, jump_candidates,
+    level_1_paths, parent_path,
+};
 use crate::tui::views::import_view::{self, ImportViewState};
 use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view, ssh_view};
 use crate::tui::widgets::confirm_dialog::ConfirmDialog;
@@ -855,10 +858,219 @@ impl App {
         let Some(fv) = self.folder_view_state.as_mut() else {
             return;
         };
-        if k.code == KeyCode::Esc && fv.jump.is_none() && fv.search.is_none() {
-            self.folder_view_state = None;
-            self.mode = AppMode::Main;
+
+        // Jump overlay takes priority
+        if fv.jump.is_some() {
+            self.handle_folder_jump_key(k);
+            return;
         }
+
+        // Search bar takes priority
+        if fv.search.is_some() {
+            self.handle_folder_search_key(k);
+            return;
+        }
+
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => {
+                self.folder_view_state = None;
+                self.mode = AppMode::Main;
+            }
+
+            (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                let all_cands = jump_candidates("", &fv.tree);
+                fv.jump = Some(JumpState { input: String::new(), candidates: all_cands, sel: 0 });
+            }
+
+            (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                let scope = fv.focused_path().to_string();
+                fv.search = Some(SearchState { scope_path: scope, query: String::new() });
+            }
+
+            (KeyCode::Up, _) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                match fv.focus {
+                    FolderFocus::DirA => {
+                        if fv.sel_a > 0 {
+                            fv.sel_a -= 1;
+                        }
+                        fv.update_col_b();
+                    }
+                    FolderFocus::DirB => {
+                        if fv.sel_b > 0 {
+                            fv.sel_b -= 1;
+                        }
+                    }
+                    FolderFocus::Hosts => {
+                        if fv.host_sel > 0 {
+                            fv.host_sel -= 1;
+                        }
+                    }
+                }
+                self.refresh_folder_hosts();
+            }
+
+            (KeyCode::Down, _) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                match fv.focus {
+                    FolderFocus::DirA => {
+                        if fv.sel_a + 1 < fv.col_a.len() {
+                            fv.sel_a += 1;
+                        }
+                        fv.update_col_b();
+                    }
+                    FolderFocus::DirB => {
+                        if fv.sel_b + 1 < fv.col_b.len() {
+                            fv.sel_b += 1;
+                        }
+                    }
+                    FolderFocus::Hosts => {
+                        let max = self.folder_host_indices.len().saturating_sub(1);
+                        let fv = self.folder_view_state.as_mut().unwrap();
+                        if fv.host_sel < max {
+                            fv.host_sel += 1;
+                        }
+                    }
+                }
+                self.refresh_folder_hosts();
+            }
+
+            (KeyCode::Enter, _) | (KeyCode::Right, _) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                match fv.focus {
+                    FolderFocus::DirA => {
+                        if !fv.col_b.is_empty() {
+                            let new_col_a = fv.col_b.clone();
+                            fv.col_a = new_col_a;
+                            fv.sel_a = 0;
+                            fv.depth += 1;
+                            fv.update_col_b();
+                        } else {
+                            fv.focus = FolderFocus::Hosts;
+                        }
+                    }
+                    FolderFocus::DirB => {
+                        let children = fv
+                            .tree
+                            .get(fv.col_b.get(fv.sel_b).map(|s| s.as_str()).unwrap_or("/"))
+                            .map(|n| n.children.clone())
+                            .unwrap_or_default();
+                        if !children.is_empty() {
+                            fv.col_a = fv.col_b.clone();
+                            fv.sel_a = fv.sel_b;
+                            fv.depth += 1;
+                            fv.update_col_b();
+                            fv.focus = FolderFocus::DirA;
+                        } else {
+                            fv.focus = FolderFocus::Hosts;
+                        }
+                    }
+                    FolderFocus::Hosts => {
+                        let host_sel = fv.host_sel;
+                        if let Some(&idx) = self.folder_host_indices.get(host_sel) {
+                            self.folder_view_state = None;
+                            self.mode = AppMode::Main;
+                            self.trigger_connect = true;
+                            if let Some(pos) = self.filtered_indices.iter().position(|&i| i == idx) {
+                                self.list_state.select(Some(pos));
+                            }
+                        }
+                    }
+                }
+                self.refresh_folder_hosts();
+            }
+
+            (KeyCode::Backspace, _) | (KeyCode::Left, _) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                match fv.focus {
+                    FolderFocus::DirA if fv.depth > 0 => {
+                        let current_first = fv.col_a.first().cloned().unwrap_or_else(|| "/".into());
+                        let parent = parent_path(&current_first);
+                        let grandparent = parent_path(&parent);
+                        fv.col_b = fv.col_a.clone();
+                        fv.sel_b = fv.sel_a;
+                        fv.col_a = fv
+                            .tree
+                            .get(&grandparent)
+                            .map(|n| n.children.clone())
+                            .unwrap_or_else(|| level_1_paths(&fv.tree));
+                        fv.sel_a = fv.col_a.iter().position(|p| p == &parent).unwrap_or(0);
+                        fv.depth -= 1;
+                        fv.focus = FolderFocus::DirA;
+                    }
+                    FolderFocus::DirB | FolderFocus::Hosts => {
+                        fv.focus = FolderFocus::DirA;
+                    }
+                    _ => {}
+                }
+                self.refresh_folder_hosts();
+            }
+
+            (KeyCode::Tab, _) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                fv.focus = match fv.focus {
+                    FolderFocus::DirA => {
+                        if !fv.col_b.is_empty() {
+                            FolderFocus::DirB
+                        } else {
+                            FolderFocus::Hosts
+                        }
+                    }
+                    FolderFocus::DirB => FolderFocus::Hosts,
+                    FolderFocus::Hosts => FolderFocus::DirA,
+                };
+            }
+
+            (KeyCode::BackTab, _) => {
+                let fv = self.folder_view_state.as_mut().unwrap();
+                fv.focus = match fv.focus {
+                    FolderFocus::DirA => FolderFocus::Hosts,
+                    FolderFocus::DirB => FolderFocus::DirA,
+                    FolderFocus::Hosts => {
+                        if !fv.col_b.is_empty() {
+                            FolderFocus::DirB
+                        } else {
+                            FolderFocus::DirA
+                        }
+                    }
+                };
+            }
+
+            (KeyCode::Char('s'), KeyModifiers::NONE)
+                if matches!(
+                    self.folder_view_state.as_ref().map(|f| f.focus),
+                    Some(FolderFocus::Hosts)
+                ) =>
+            {
+                let host_sel = self.folder_view_state.as_ref().unwrap().host_sel;
+                if let Some(&idx) = self.folder_host_indices.get(host_sel) {
+                    self.folder_view_state = None;
+                    self.mode = AppMode::Main;
+                    self.trigger_sftp = true;
+                    if let Some(pos) = self.filtered_indices.iter().position(|&i| i == idx) {
+                        self.list_state.select(Some(pos));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    fn refresh_folder_hosts(&mut self) {
+        if let Some(fv) = &self.folder_view_state {
+            self.folder_host_indices = hosts_in_path(fv.focused_path(), &self.hosts);
+        }
+    }
+
+    fn handle_folder_jump_key(&mut self, _k: KeyEvent) {
+        // Implemented in Task 5
+    }
+
+    fn handle_folder_search_key(&mut self, _k: KeyEvent) {
+        // Implemented in Task 6
     }
 
     fn handle_import_input(&mut self, k: KeyEvent) {
