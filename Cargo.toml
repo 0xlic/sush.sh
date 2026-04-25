@@ -45,6 +45,9 @@ dirs = "6.0"
 # Host ID
 uuid = { version = "1.23", features = ["v4"] }
 
+# System keyring
+keyring = { version = "3.6.0", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+
 [dev-dependencies]
 tempfile = "3.10"
 
