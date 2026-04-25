@@ -913,6 +913,20 @@ impl App {
         }
     }
 
+    fn key_passphrase_prompt_title(&mut self, path: &str, account: &str) -> String {
+        let title = format!("Key passphrase ({}): ", path);
+        let Some(failure) = self
+            .metadata
+            .secret_save_failures
+            .iter()
+            .find(|failure| failure.account == account)
+        else {
+            return title;
+        };
+
+        format!("Password was not saved last time: {}\n{title}", failure.reason)
+    }
+
     fn handle_edit_input(&mut self, k: KeyEvent) {
         let Some(draft) = self.edit_draft.as_mut() else {
             return;
@@ -1726,12 +1740,32 @@ impl App {
                 return Ok(session);
             }
 
-            let title = format!("Key passphrase ({}): ", expanded.display());
+            let identity_hint = expanded.display().to_string();
+            let key_passphrase_key = SecretKey::new(
+                &host.id,
+                SecretKind::KeyPassphrase,
+                Some(identity_hint.as_str()),
+            );
+            if let Ok(Some(pass)) = self.secret_store.get(&key_passphrase_key)
+                && try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
+                    .await
+                    .unwrap_or(false)
+            {
+                return Ok(session);
+            }
+
+            let title =
+                self.key_passphrase_prompt_title(identity_hint.as_str(), &key_passphrase_key.account);
             if let Some(pass) = self.prompt_password(terminal, bus, &title).await?
                 && try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
                     .await
                     .unwrap_or(false)
             {
+                match self.secret_store.set(&key_passphrase_key, &pass) {
+                    Ok(()) => self.clear_secret_save_failure(&key_passphrase_key.account),
+                    Err(error) => self
+                        .record_secret_save_failure(key_passphrase_key.account.clone(), &error),
+                }
                 return Ok(session);
             }
         }
@@ -2297,5 +2331,31 @@ mod tests {
                 .reason
                 .contains("system keyring is unavailable")
         );
+    }
+
+    #[test]
+    fn key_passphrase_account_uses_identity_path() {
+        let key = SecretKey::new(
+            "host-1",
+            SecretKind::KeyPassphrase,
+            Some("/Users/me/.ssh/id_ed25519"),
+        );
+        assert!(key.account.contains("id_ed25519"));
+    }
+
+    #[test]
+    fn key_passphrase_prompt_title_includes_failure_reason() {
+        let mut app = app_with(vec![]);
+        app.metadata.upsert_secret_failure(
+            "host-1:key_passphrase:/Users/me/.ssh/id_ed25519".into(),
+            "permission denied by system keyring".into(),
+        );
+        let title = app.key_passphrase_prompt_title(
+            "/Users/me/.ssh/id_ed25519",
+            "host-1:key_passphrase:/Users/me/.ssh/id_ed25519",
+        );
+        assert!(title.contains("Password was not saved last time"));
+        assert!(title.contains("permission denied by system keyring"));
+        assert!(title.contains("Key passphrase (/Users/me/.ssh/id_ed25519):"));
     }
 }
