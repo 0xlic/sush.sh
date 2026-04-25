@@ -20,6 +20,7 @@ use crate::ssh::session::{ActiveSession, try_key_auth};
 use crate::ssh::terminal::TerminalEmulator;
 use crate::tui::event::{AppEvent, EventBus};
 use crate::tui::views::edit_view::{self, EditDraft, EditField};
+use crate::tui::views::folder_view::{self, FolderViewState, hosts_in_path};
 use crate::tui::views::import_view::{self, ImportViewState};
 use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view, ssh_view};
 use crate::tui::widgets::confirm_dialog::ConfirmDialog;
@@ -37,6 +38,7 @@ pub enum AppMode {
     Sftp,
     Edit,
     ImportSshConfig,
+    FolderView,
 }
 
 struct PwdDialog {
@@ -102,6 +104,8 @@ pub struct App {
     pub probe_result: Option<bool>,
     pub status_msg: Option<(String, Instant)>,
     pub show_import_prompt: bool,
+    pub folder_view_state: Option<FolderViewState>,
+    pub folder_host_indices: Vec<usize>,
     pwd_dialog: Option<PwdDialog>,
 }
 
@@ -155,6 +159,8 @@ impl App {
             probe_result: None,
             status_msg: None,
             show_import_prompt: false,
+            folder_view_state: None,
+            folder_host_indices: vec![],
             pwd_dialog: None,
         })
     }
@@ -435,6 +441,12 @@ impl App {
                 }
                 Ok(())
             }
+            AppMode::FolderView => {
+                for key in decode_tui_keys(&data) {
+                    self.handle_folder_input(key);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -454,7 +466,7 @@ impl App {
         match self.mode {
             AppMode::Main => self.handle_main_key(k),
             AppMode::Sftp => self.handle_sftp_key(k),
-            AppMode::Ssh | AppMode::Edit | AppMode::ImportSshConfig => {}
+            AppMode::Ssh | AppMode::Edit | AppMode::ImportSshConfig | AppMode::FolderView => {}
         }
     }
 
@@ -524,6 +536,12 @@ impl App {
             }
             (KeyCode::Char('i'), KeyModifiers::NONE) => {
                 self.open_import_view();
+            }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                let fv = FolderViewState::new(&self.hosts);
+                self.folder_host_indices = hosts_in_path(fv.focused_path(), &self.hosts);
+                self.folder_view_state = Some(fv);
+                self.mode = AppMode::FolderView;
             }
             _ => {}
         }
@@ -830,6 +848,16 @@ impl App {
                 self.import_prompted = true;
                 self.save_hosts_to_disk();
             }
+        }
+    }
+
+    fn handle_folder_input(&mut self, k: KeyEvent) {
+        let Some(fv) = self.folder_view_state.as_mut() else {
+            return;
+        };
+        if k.code == KeyCode::Esc && fv.jump.is_none() && fv.search.is_none() {
+            self.folder_view_state = None;
+            self.mode = AppMode::Main;
         }
     }
 
@@ -1353,6 +1381,18 @@ impl App {
                     import_view::render(f, state);
                 }
             }
+            AppMode::FolderView => {
+                if let Some(fv) = &self.folder_view_state {
+                    let probe: Option<Option<bool>> = if self.probe_result.is_some() {
+                        Some(self.probe_result)
+                    } else if self.probe_rx.is_some() {
+                        Some(None)
+                    } else {
+                        None
+                    };
+                    folder_view::render(f, fv, &self.hosts, &self.folder_host_indices, probe);
+                }
+            }
         })?;
         self.list_state = list_state;
         Ok(())
@@ -1546,6 +1586,8 @@ mod tests {
             probe_result: None,
             status_msg: None,
             show_import_prompt: false,
+            folder_view_state: None,
+            folder_host_indices: vec![],
             pwd_dialog: None,
         }
     }
