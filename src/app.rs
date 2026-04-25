@@ -883,15 +883,11 @@ impl App {
 
     fn password_prompt_title(&mut self, user: &str, hostname: &str, account: &str) -> String {
         let title = format!("Password for {}@{}: ", user, hostname);
-        let Some(failure) = self
-            .metadata
-            .secret_save_failures
-            .iter()
-            .find(|failure| failure.account == account)
-        else {
+        let Some(failure) = self.metadata.take_secret_failure(account) else {
             return title;
         };
 
+        self.save_hosts_to_disk();
         format!("Password was not saved last time: {}\n{title}", failure.reason)
     }
 
@@ -915,15 +911,11 @@ impl App {
 
     fn key_passphrase_prompt_title(&mut self, path: &str, account: &str) -> String {
         let title = format!("Key passphrase ({}): ", path);
-        let Some(failure) = self
-            .metadata
-            .secret_save_failures
-            .iter()
-            .find(|failure| failure.account == account)
-        else {
+        let Some(failure) = self.metadata.take_secret_failure(account) else {
             return title;
         };
 
+        self.save_hosts_to_disk();
         format!("Password was not saved last time: {}\n{title}", failure.reason)
     }
 
@@ -1740,7 +1732,7 @@ impl App {
                 return Ok(session);
             }
 
-            let identity_hint = expanded.display().to_string();
+            let identity_hint = key_path.display().to_string();
             let key_passphrase_key = SecretKey::new(
                 &host.id,
                 SecretKind::KeyPassphrase,
