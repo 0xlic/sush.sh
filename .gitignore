@@ -1,3 +1,4 @@
 /target
 *.un~
 .DS_Store
+.trae/
