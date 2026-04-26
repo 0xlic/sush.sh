@@ -161,12 +161,7 @@ pub fn render(
         } else {
             &DEFAULT_HINTS
         };
-        f.render_widget(
-            StatusBar {
-                hints,
-            },
-            chunks[2],
-        );
+        f.render_widget(StatusBar { hints }, chunks[2]);
     }
 }
 

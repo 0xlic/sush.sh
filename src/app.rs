@@ -336,6 +336,12 @@ impl RecursiveFailureState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SftpDeleteConfirmState {
+    side: PaneSide,
+    selected_count: usize,
+}
+
 pub struct App {
     pub mode: AppMode,
     pub hosts: Vec<Host>,
@@ -351,6 +357,7 @@ pub struct App {
     pub trigger_pane_enter: bool,
     pub trigger_download: bool,
     pub trigger_upload: bool,
+    pub trigger_sftp_delete: bool,
     pub trigger_remote_edit: bool,
     pub trigger_refresh_local: bool,
     pub trigger_refresh_remote: bool,
@@ -373,6 +380,7 @@ pub struct App {
     pub edit_draft: Option<EditDraft>,
     pub import_state: Option<ImportViewState>,
     pub confirm_delete: bool,
+    sftp_delete_confirm: Option<SftpDeleteConfirmState>,
     pub import_prompted: bool,
     pub metadata: store::Metadata,
     pub connection_history: ConnectionHistory,
@@ -418,6 +426,7 @@ impl App {
             trigger_pane_enter: false,
             trigger_download: false,
             trigger_upload: false,
+            trigger_sftp_delete: false,
             trigger_remote_edit: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
@@ -439,6 +448,7 @@ impl App {
             edit_draft: None,
             import_state: None,
             confirm_delete: false,
+            sftp_delete_confirm: None,
             import_prompted,
             metadata,
             connection_history,
@@ -544,6 +554,13 @@ impl App {
                 self.trigger_upload = false;
                 if let Err(e) = self.start_upload().await {
                     eprintln!("[Upload error: {e}]");
+                }
+            }
+
+            if self.trigger_sftp_delete {
+                self.trigger_sftp_delete = false;
+                if let Err(e) = self.start_sftp_delete().await {
+                    eprintln!("[Delete error: {e}]");
                 }
             }
 
@@ -772,6 +789,10 @@ impl App {
             self.handle_confirm_delete(k);
             return;
         }
+        if self.sftp_delete_confirm.is_some() {
+            self.handle_sftp_delete_confirm(k);
+            return;
+        }
         if self.show_import_prompt {
             self.handle_import_prompt_key(k);
             return;
@@ -991,6 +1012,7 @@ impl App {
             }
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
+            (KeyCode::Char('D'), KeyModifiers::NONE) => self.trigger_sftp_delete_confirm(),
             (KeyCode::Char('e'), KeyModifiers::NONE) => self.trigger_remote_edit(),
             // D delete and r rename are not implemented yet.
             (KeyCode::Tab, _) => self.toggle_pane(),
@@ -1018,6 +1040,23 @@ impl App {
             return;
         }
         self.trigger_remote_edit = true;
+    }
+
+    fn trigger_sftp_delete_confirm(&mut self) {
+        let Some(pane) = &self.sftp_pane else {
+            return;
+        };
+        let selected_count = match pane.side {
+            PaneSide::Local => pane.local_selection.len(),
+            PaneSide::Remote => pane.remote_selection.len(),
+        };
+        if selected_count == 0 {
+            return;
+        }
+        self.sftp_delete_confirm = Some(SftpDeleteConfirmState {
+            side: pane.side,
+            selected_count,
+        });
     }
 
     fn exit_sftp(&mut self) {
@@ -1517,6 +1556,19 @@ impl App {
             _ => {
                 self.confirm_delete = false;
             }
+        }
+    }
+
+    fn handle_sftp_delete_confirm(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.sftp_delete_confirm = None;
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.sftp_delete_confirm = None;
+                self.trigger_sftp_delete = true;
+            }
+            _ => {}
         }
     }
 
@@ -2491,6 +2543,64 @@ impl App {
         Ok(())
     }
 
+    async fn start_sftp_delete(&mut self) -> Result<()> {
+        let Some(pane) = &self.sftp_pane else {
+            return Ok(());
+        };
+
+        match pane.side {
+            PaneSide::Local => {
+                let selected_entries = pane
+                    .local_selection
+                    .iter()
+                    .filter_map(|index| pane.local_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+
+                for entry in &selected_entries {
+                    let path = pane.local_path.join(&entry.name);
+                    if entry.is_dir {
+                        std::fs::remove_dir_all(&path)?;
+                    } else {
+                        std::fs::remove_file(&path)?;
+                    }
+                }
+
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.clear_active_selection();
+                }
+                self.trigger_refresh_local = true;
+                self.set_status(format!("Deleted {} local item(s)", selected_entries.len()));
+            }
+            PaneSide::Remote => {
+                let selected_entries = pane
+                    .remote_selection
+                    .iter()
+                    .filter_map(|index| pane.remote_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+
+                let Some(client) = &self.sftp_client else {
+                    bail!("missing SFTP client for remote delete");
+                };
+
+                for entry in &selected_entries {
+                    let remote_path =
+                        format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
+                    client
+                        .remove_path_recursive(&remote_path, entry.is_dir)
+                        .await?;
+                }
+
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.clear_active_selection();
+                }
+                self.trigger_refresh_remote = true;
+                self.set_status(format!("Deleted {} remote item(s)", selected_entries.len()));
+            }
+        }
+
+        Ok(())
+    }
+
     async fn ssh_connect_and_takeover(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -2821,6 +2931,21 @@ impl App {
                     }
                     .render(f);
                 }
+                if let Some(confirm) = self.sftp_delete_confirm {
+                    let scope = match confirm.side {
+                        PaneSide::Local => "local",
+                        PaneSide::Remote => "remote",
+                    };
+                    ChoiceDialog {
+                        title: "Delete Selected",
+                        message: &format!(
+                            "Delete {} selected {scope} item(s)?",
+                            confirm.selected_count
+                        ),
+                        hints: vec![("y", "Delete"), ("n/Esc", "Cancel")],
+                    }
+                    .render(f);
+                }
             }
             AppMode::Ssh => {
                 if let Some(emulator) = &self.terminal_emulator {
@@ -3087,6 +3212,7 @@ mod tests {
             trigger_pane_enter: false,
             trigger_download: false,
             trigger_upload: false,
+            trigger_sftp_delete: false,
             trigger_remote_edit: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
@@ -3108,6 +3234,7 @@ mod tests {
             edit_draft: None,
             import_state: None,
             confirm_delete: false,
+            sftp_delete_confirm: None,
             import_prompted: false,
             metadata: Metadata::default(),
             connection_history: ConnectionHistory::load(std::path::PathBuf::from(
@@ -3468,7 +3595,11 @@ mod tests {
         app.mode = AppMode::Sftp;
 
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
-        app.sftp_pane.as_mut().unwrap().remote_list_state.select(Some(2));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(2));
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
 
@@ -3494,7 +3625,11 @@ mod tests {
         app.mode = AppMode::Sftp;
 
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
-        app.sftp_pane.as_mut().unwrap().local_list_state.select(Some(0));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .local_list_state
+            .select(Some(0));
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
 
@@ -3561,7 +3696,10 @@ mod tests {
         let transfer = app.active_recursive_transfer.as_ref().unwrap();
         assert_eq!(transfer.plan.dir, TransferDir::Download);
         assert_eq!(transfer.plan.source_root, PathBuf::from("/remote"));
-        assert_eq!(transfer.plan.destination_root, temp.path().display().to_string());
+        assert_eq!(
+            transfer.plan.destination_root,
+            temp.path().display().to_string()
+        );
         assert_eq!(transfer.plan.files.len(), 2);
         assert_eq!(
             transfer
@@ -3575,6 +3713,70 @@ mod tests {
         let pane = app.sftp_pane.as_ref().unwrap();
         assert!(pane.remote_selection.is_empty());
         assert_eq!(pane.remote_selection_anchor, None);
+    }
+
+    #[test]
+    fn batch_delete_uses_selected_remote_entries() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.remote_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('D')));
+
+        assert!(app.sftp_delete_confirm.is_some());
+    }
+
+    #[test]
+    fn esc_clears_multi_select_without_leaving_sftp() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.local_selection.insert(0);
+        pane.local_selection_anchor = Some(0);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        assert_eq!(app.mode, AppMode::Sftp);
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.is_empty());
+        assert_eq!(pane.local_selection_anchor, None);
+    }
+
+    #[test]
+    fn confirming_batch_delete_removes_selected_local_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(temp.path().join("b.txt"), b"b").unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_path = temp.path().to_path_buf();
+        pane.local_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.local_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.trigger_sftp_delete_confirm();
+        app.handle_sftp_delete_confirm(KeyEvent::from(KeyCode::Char('y')));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_sftp_delete()).unwrap();
+
+        assert!(!temp.path().join("a.txt").exists());
+        assert!(!temp.path().join("b.txt").exists());
+        assert!(app.sftp_delete_confirm.is_none());
+        assert!(app.trigger_refresh_local);
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.is_empty());
+        assert_eq!(pane.local_selection_anchor, None);
     }
 
     #[test]

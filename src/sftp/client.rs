@@ -131,6 +131,26 @@ impl SftpClient {
 
         Ok(())
     }
+
+    pub async fn remove_path_recursive(&self, remote_path: &str, is_dir: bool) -> Result<()> {
+        if is_dir {
+            for entry in self.list_dir(remote_path).await? {
+                let child_path = build_remote_child_path(remote_path, &entry.name);
+                Box::pin(self.remove_path_recursive(&child_path, entry.is_dir)).await?;
+            }
+            self.session
+                .remove_dir(remote_path)
+                .await
+                .with_context(|| format!("failed to remove remote directory: {remote_path}"))?;
+        } else {
+            self.session
+                .remove_file(remote_path)
+                .await
+                .with_context(|| format!("failed to remove remote file: {remote_path}"))?;
+        }
+
+        Ok(())
+    }
 }
 
 fn build_remote_child_path(parent: &str, name: &str) -> String {
@@ -221,5 +241,6 @@ mod tests {
     fn remote_edit_transfer_helpers_exist() {
         let _download = SftpClient::download_file_to_path;
         let _upload = SftpClient::upload_file_from_path;
+        let _delete = SftpClient::remove_path_recursive;
     }
 }
