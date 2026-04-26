@@ -60,6 +60,7 @@ pub fn render(
                     ("Tab", "Local/Remote"),
                     ("d", "Download"),
                     ("u", "Upload"),
+                    ("e", "Edit"),
                     ("D", "Delete"),
                     ("r", "Rename"),
                     ("Ctrl+\\", "SSH"),

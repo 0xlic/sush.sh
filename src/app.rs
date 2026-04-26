@@ -149,6 +149,7 @@ pub struct App {
     pub trigger_pane_enter: bool,
     pub trigger_download: bool,
     pub trigger_upload: bool,
+    pub trigger_remote_edit: bool,
     pub trigger_refresh_local: bool,
     pub trigger_refresh_remote: bool,
     pub trigger_ssh_resume: bool,
@@ -211,6 +212,7 @@ impl App {
             trigger_pane_enter: false,
             trigger_download: false,
             trigger_upload: false,
+            trigger_remote_edit: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
             trigger_ssh_resume: false,
@@ -730,6 +732,7 @@ impl App {
             _ if is_switch_key(k) => self.trigger_ssh_resume = true,
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
+            (KeyCode::Char('e'), KeyModifiers::NONE) => self.trigger_remote_edit(),
             // D delete and r rename are not implemented yet.
             (KeyCode::Tab, _) => self.toggle_pane(),
             (KeyCode::Up, _) => self.pane_select_prev(),
@@ -737,6 +740,25 @@ impl App {
             (KeyCode::Enter, _) => self.trigger_pane_enter = true,
             _ => {}
         }
+    }
+
+    fn trigger_remote_edit(&mut self) {
+        let Some(pane) = &self.sftp_pane else {
+            return;
+        };
+        if pane.side != PaneSide::Remote {
+            self.set_status("Remote edit only works from the remote pane".into());
+            return;
+        }
+        let idx = pane.list_state.selected().unwrap_or(0);
+        let Some(entry) = pane.remote_entries.get(idx) else {
+            return;
+        };
+        if entry.is_dir {
+            self.set_status("Remote edit only works for files".into());
+            return;
+        }
+        self.trigger_remote_edit = true;
     }
 
     fn exit_sftp(&mut self) {
@@ -2274,6 +2296,7 @@ mod tests {
             trigger_pane_enter: false,
             trigger_download: false,
             trigger_upload: false,
+            trigger_remote_edit: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
             trigger_ssh_resume: false,
@@ -2335,6 +2358,20 @@ mod tests {
             description: String::new(),
             source: HostSource::Manual,
         }
+    }
+
+    fn app_with_sftp_pane(side: PaneSide, entries: Vec<crate::sftp::client::FileEntry>) -> App {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = side;
+        match side {
+            PaneSide::Local => pane.local_entries = entries,
+            PaneSide::Remote => pane.remote_entries = entries,
+        }
+        pane.list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+        app
     }
 
     #[test]
@@ -2452,5 +2489,47 @@ mod tests {
         session.mark_upload_failed("network error".into());
         assert_eq!(session.sync_state, RemoteEditSyncState::UploadFailed);
         assert_eq!(session.last_error.as_deref(), Some("network error"));
+    }
+
+    #[test]
+    fn pressing_e_in_remote_pane_triggers_remote_edit() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Remote,
+            vec![crate::sftp::client::FileEntry {
+                name: "hosts".into(),
+                is_dir: false,
+                size: 12,
+            }],
+        );
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.trigger_remote_edit);
+    }
+
+    #[test]
+    fn pressing_e_in_local_pane_does_not_trigger_remote_edit() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Local,
+            vec![crate::sftp::client::FileEntry {
+                name: "hosts".into(),
+                is_dir: false,
+                size: 12,
+            }],
+        );
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(!app.trigger_remote_edit);
+    }
+
+    #[test]
+    fn pressing_e_on_remote_directory_does_not_trigger_remote_edit() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Remote,
+            vec![crate::sftp::client::FileEntry {
+                name: "etc".into(),
+                is_dir: true,
+                size: 0,
+            }],
+        );
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(!app.trigger_remote_edit);
     }
 }
