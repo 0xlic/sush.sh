@@ -3322,6 +3322,25 @@ mod tests {
     }
 
     #[test]
+    fn pane_select_next_moves_only_active_pane_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.remote_entries = vec![file_entry("r1.txt", false), file_entry("r2.txt", false)];
+        pane.local_list_state.select(Some(0));
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.pane_select_next();
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.remote_list_state.selected(), Some(1));
+        assert_eq!(pane.local_list_state.selected(), Some(0));
+    }
+
+    #[test]
     fn polling_detects_changed_fingerprint() {
         let mut state = RemoteEditWatchState::new("old".into());
         assert!(state.should_upload("new"));
