@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -10,6 +12,7 @@ pub struct FileList<'a> {
     pub entries: &'a [FileEntry],
     pub title: &'a str,
     pub chrome_style: Style,
+    pub selected_indices: &'a BTreeSet<usize>,
 }
 
 impl<'a> StatefulWidget for FileList<'a> {
@@ -18,13 +21,14 @@ impl<'a> StatefulWidget for FileList<'a> {
         let items: Vec<ListItem> = self
             .entries
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(index, e)| {
                 let size = if e.is_dir {
                     "<DIR>".to_string()
                 } else {
                     human_size(e.size)
                 };
-                let prefix = if e.is_dir { "▸ " } else { "  " };
+                let prefix = entry_prefix(self.selected_indices.contains(&index), e.is_dir);
                 ListItem::new(Line::from(vec![
                     Span::raw(prefix),
                     Span::styled(
@@ -54,6 +58,16 @@ impl<'a> StatefulWidget for FileList<'a> {
     }
 }
 
+fn entry_prefix(is_selected: bool, is_dir: bool) -> &'static str {
+    if is_selected {
+        "[x] "
+    } else if is_dir {
+        "▸ "
+    } else {
+        "  "
+    }
+}
+
 fn human_size(n: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
@@ -66,5 +80,20 @@ fn human_size(n: u64) -> String {
         format!("{} {}", n, UNITS[u])
     } else {
         format!("{:.1} {}", v, UNITS[u])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entry_prefix;
+
+    #[test]
+    fn selected_file_uses_marked_prefix() {
+        assert_eq!(entry_prefix(true, false), "[x] ");
+    }
+
+    #[test]
+    fn unselected_directory_keeps_directory_prefix() {
+        assert_eq!(entry_prefix(false, true), "▸ ");
     }
 }

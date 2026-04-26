@@ -10,6 +10,16 @@ use crate::tui::widgets::progress_bar::ProgressView;
 use crate::tui::widgets::status_bar::StatusBar;
 
 const DUAL_PANE_MIN_WIDTH: u16 = 100;
+const DEFAULT_HINTS: [(&str, &str); 8] = [
+    ("Tab", "Focus"),
+    ("d", "Download"),
+    ("u", "Upload"),
+    ("e", "Edit"),
+    ("D", "Delete"),
+    ("r", "Rename"),
+    ("Ctrl+\\", "SSH"),
+    ("q", "Quit"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SftpLayoutMode {
@@ -30,6 +40,13 @@ fn pane_focus_style(is_active: bool) -> Style {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default()
+    }
+}
+
+fn multi_select_hints(side: PaneSide) -> [(&'static str, &'static str); 3] {
+    match side {
+        PaneSide::Local => [("u", "Upload"), ("D", "Delete"), ("Esc", "Cancel")],
+        PaneSide::Remote => [("d", "Download"), ("D", "Delete"), ("Esc", "Cancel")],
     }
 }
 
@@ -74,6 +91,10 @@ pub fn render(
                     entries,
                     title: label,
                     chrome_style: pane_focus_style(true),
+                    selected_indices: match pane.side {
+                        PaneSide::Local => &pane.local_selection,
+                        PaneSide::Remote => &pane.remote_selection,
+                    },
                 },
                 chunks[1],
                 list_state,
@@ -101,6 +122,7 @@ pub fn render(
                     entries: pane.local_entries.as_slice(),
                     title: "Local",
                     chrome_style: pane_focus_style(local_is_active),
+                    selected_indices: &pane.local_selection,
                 },
                 panes[0],
                 &mut pane.local_list_state,
@@ -110,6 +132,7 @@ pub fn render(
                     entries: pane.remote_entries.as_slice(),
                     title: "Remote",
                     chrome_style: pane_focus_style(remote_is_active),
+                    selected_indices: &pane.remote_selection,
                 },
                 panes[1],
                 &mut pane.remote_list_state,
@@ -128,18 +151,19 @@ pub fn render(
     } else if let Some(status) = status_msg {
         f.render_widget(Paragraph::new(status), chunks[2]);
     } else {
+        let active_multi_select = match pane.side {
+            PaneSide::Local => !pane.local_selection.is_empty(),
+            PaneSide::Remote => !pane.remote_selection.is_empty(),
+        };
+        let batch_hints = multi_select_hints(pane.side);
+        let hints: &[(&str, &str)] = if active_multi_select {
+            &batch_hints
+        } else {
+            &DEFAULT_HINTS
+        };
         f.render_widget(
             StatusBar {
-                hints: &[
-                    ("Tab", "Focus"),
-                    ("d", "Download"),
-                    ("u", "Upload"),
-                    ("e", "Edit"),
-                    ("D", "Delete"),
-                    ("r", "Rename"),
-                    ("Ctrl+\\", "SSH"),
-                    ("q", "Quit"),
-                ],
+                hints,
             },
             chunks[2],
         );
@@ -150,7 +174,12 @@ pub fn render(
 mod tests {
     use ratatui::style::{Color, Style};
 
-    use super::{DUAL_PANE_MIN_WIDTH, SftpLayoutMode, layout_mode_for_width, pane_focus_style};
+    use crate::sftp::PaneSide;
+
+    use super::{
+        DUAL_PANE_MIN_WIDTH, SftpLayoutMode, layout_mode_for_width, multi_select_hints,
+        pane_focus_style,
+    };
 
     #[test]
     fn wide_width_uses_dual_pane_layout() {
@@ -174,5 +203,21 @@ mod tests {
     fn active_pane_uses_highlighted_focus_style() {
         assert_eq!(pane_focus_style(true), Style::default().fg(Color::Cyan));
         assert_eq!(pane_focus_style(false), Style::default());
+    }
+
+    #[test]
+    fn multi_select_status_bar_shows_batch_actions_for_local_pane() {
+        assert_eq!(
+            multi_select_hints(PaneSide::Local),
+            [("u", "Upload"), ("D", "Delete"), ("Esc", "Cancel")]
+        );
+    }
+
+    #[test]
+    fn multi_select_status_bar_shows_batch_actions_for_remote_pane() {
+        assert_eq!(
+            multi_select_hints(PaneSide::Remote),
+            [("d", "Download"), ("D", "Delete"), ("Esc", "Cancel")]
+        );
     }
 }
