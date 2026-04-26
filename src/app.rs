@@ -203,6 +203,23 @@ impl RemoteEditWatchState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileConflictChoice {
+    Skip,
+    Overwrite,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConflictResolutionState {
+    default_file_conflict: Option<FileConflictChoice>,
+}
+
+impl ConflictResolutionState {
+    fn apply_choice(&mut self, choice: FileConflictChoice, apply_to_remaining: bool) {
+        self.default_file_conflict = apply_to_remaining.then_some(choice);
+    }
+}
+
 pub struct App {
     pub mode: AppMode,
     pub hosts: Vec<Host>,
@@ -2792,5 +2809,22 @@ mod tests {
         assert!(session.should_upload("hash-2"));
         session.mark_upload_failed("timeout".into());
         assert!(session.should_upload("hash-3"));
+    }
+
+    #[test]
+    fn conflict_prompt_accepts_overwrite_for_remaining_files() {
+        let mut state = ConflictResolutionState::default();
+        state.apply_choice(FileConflictChoice::Overwrite, true);
+        assert_eq!(
+            state.default_file_conflict,
+            Some(FileConflictChoice::Overwrite)
+        );
+    }
+
+    #[test]
+    fn conflict_prompt_accepts_skip_without_default() {
+        let mut state = ConflictResolutionState::default();
+        state.apply_choice(FileConflictChoice::Skip, false);
+        assert_eq!(state.default_file_conflict, None);
     }
 }
