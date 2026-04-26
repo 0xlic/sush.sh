@@ -1,4 +1,5 @@
 /target
+.worktrees/
 *.un~
 .DS_Store
 .trae/
