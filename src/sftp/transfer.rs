@@ -86,6 +86,23 @@ impl RecursiveAggregateProgress {
 
 const CHUNK: usize = 32 * 1024;
 
+pub fn build_local_recursive_plan(
+    source_root: &Path,
+    destination_parent: &str,
+) -> Result<RecursiveTransferPlan> {
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    collect_local_entries(source_root, source_root, &mut directories, &mut files)?;
+    directories.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(RecursiveTransferPlan::upload(
+        source_root.to_path_buf(),
+        destination_parent.to_string(),
+        directories,
+        files,
+    ))
+}
+
 pub fn download(sftp: SftpSession, remote: String, local: PathBuf, total: u64) -> TransferHandle {
     let (tx, rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
@@ -249,9 +266,39 @@ fn join_remote_path(parent: &str, child: &str) -> String {
     }
 }
 
+fn collect_local_entries(
+    root: &Path,
+    current: &Path,
+    directories: &mut Vec<PlannedDir>,
+    files: &mut Vec<PlannedFile>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        let relative_path = path
+            .strip_prefix(root)
+            .context("failed to derive relative path for recursive transfer")?
+            .to_path_buf();
+        if metadata.is_dir() {
+            directories.push(PlannedDir {
+                relative_path: relative_path.clone(),
+            });
+            collect_local_entries(root, &path, directories, files)?;
+        } else if metadata.is_file() {
+            files.push(PlannedFile {
+                relative_path,
+                size: metadata.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn upload_plan_keeps_selected_directory_name() {
@@ -279,5 +326,43 @@ mod tests {
         let progress = RecursiveAggregateProgress::new(3);
         assert_eq!(progress.total_files, 3);
         assert_eq!(progress.current_file_index, 0);
+    }
+
+    #[test]
+    fn local_scan_collects_nested_files() {
+        let temp = tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("foo/bar")).unwrap();
+        std::fs::write(temp.path().join("foo/a.txt"), b"a").unwrap();
+        std::fs::write(temp.path().join("foo/bar/b.txt"), b"bb").unwrap();
+
+        let plan = build_local_recursive_plan(&temp.path().join("foo"), "/remote").unwrap();
+
+        assert_eq!(plan.destination_root, "/remote/foo");
+        assert_eq!(plan.files.len(), 2);
+        assert_eq!(plan.directories.len(), 1);
+        assert_eq!(plan.directories[0].relative_path, PathBuf::from("bar"));
+        assert_eq!(plan.files[0].relative_path, PathBuf::from("a.txt"));
+        assert_eq!(plan.files[1].relative_path, PathBuf::from("bar/b.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_scan_does_not_follow_directory_symlinks() {
+        let temp = tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("foo/real")).unwrap();
+        std::fs::write(temp.path().join("foo/real/a.txt"), b"a").unwrap();
+        std::os::unix::fs::symlink(
+            temp.path().join("foo/real"),
+            temp.path().join("foo/link-to-real"),
+        )
+        .unwrap();
+
+        let plan = build_local_recursive_plan(&temp.path().join("foo"), "/remote").unwrap();
+
+        assert_eq!(plan.directories, vec![PlannedDir { relative_path: PathBuf::from("real") }]);
+        assert_eq!(plan.files, vec![PlannedFile {
+            relative_path: PathBuf::from("real/a.txt"),
+            size: 1,
+        }]);
     }
 }
