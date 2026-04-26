@@ -24,8 +24,12 @@ pub struct SftpPaneState {
     pub remote_selection: BTreeSet<usize>,
     pub local_selection_anchor: Option<usize>,
     pub remote_selection_anchor: Option<usize>,
+    pub local_pending_anchor: Option<usize>,
+    pub remote_pending_anchor: Option<usize>,
     pub local_last_space_at: Option<Instant>,
     pub remote_last_space_at: Option<Instant>,
+    pub local_last_space_index: Option<usize>,
+    pub remote_last_space_index: Option<usize>,
 }
 
 impl SftpPaneState {
@@ -48,8 +52,12 @@ impl SftpPaneState {
             remote_selection: BTreeSet::new(),
             local_selection_anchor: None,
             remote_selection_anchor: None,
+            local_pending_anchor: None,
+            remote_pending_anchor: None,
             local_last_space_at: None,
             remote_last_space_at: None,
+            local_last_space_index: None,
+            remote_last_space_index: None,
         }
     }
 
@@ -71,46 +79,76 @@ impl SftpPaneState {
         let index = self.selected_index();
         match self.side {
             PaneSide::Local => {
+                if self.local_pending_anchor.is_some_and(|pending| pending != index) {
+                    self.local_selection_anchor = self.local_pending_anchor;
+                    self.local_pending_anchor = None;
+                }
+
+                let previous_anchor = self.local_selection_anchor;
                 let is_double_space = self
                     .local_last_space_at
                     .is_some_and(|last| last.elapsed().as_millis() < Self::DOUBLE_SPACE_WINDOW_MS)
-                    && self.local_selection_anchor.is_some()
-                    && self.local_selection_anchor != Some(index);
+                    && previous_anchor.is_some()
+                    && previous_anchor != Some(index)
+                    && self.local_last_space_index == Some(index);
                 if is_double_space {
                     apply_range_selection(
                         &mut self.local_selection,
-                        self.local_selection_anchor.unwrap(),
+                        previous_anchor.unwrap(),
                         index,
                     );
+                    self.local_pending_anchor = None;
                     self.local_last_space_at = Some(Instant::now());
+                    self.local_last_space_index = Some(index);
                     return;
                 }
                 if !self.local_selection.insert(index) {
                     self.local_selection.remove(&index);
                 }
-                self.local_selection_anchor = Some(index);
+                if previous_anchor.is_none() {
+                    self.local_selection_anchor = Some(index);
+                    self.local_pending_anchor = None;
+                } else {
+                    self.local_pending_anchor = Some(index);
+                }
                 self.local_last_space_at = Some(Instant::now());
+                self.local_last_space_index = Some(index);
             }
             PaneSide::Remote => {
+                if self.remote_pending_anchor.is_some_and(|pending| pending != index) {
+                    self.remote_selection_anchor = self.remote_pending_anchor;
+                    self.remote_pending_anchor = None;
+                }
+
+                let previous_anchor = self.remote_selection_anchor;
                 let is_double_space = self
                     .remote_last_space_at
                     .is_some_and(|last| last.elapsed().as_millis() < Self::DOUBLE_SPACE_WINDOW_MS)
-                    && self.remote_selection_anchor.is_some()
-                    && self.remote_selection_anchor != Some(index);
+                    && previous_anchor.is_some()
+                    && previous_anchor != Some(index)
+                    && self.remote_last_space_index == Some(index);
                 if is_double_space {
                     apply_range_selection(
                         &mut self.remote_selection,
-                        self.remote_selection_anchor.unwrap(),
+                        previous_anchor.unwrap(),
                         index,
                     );
+                    self.remote_pending_anchor = None;
                     self.remote_last_space_at = Some(Instant::now());
+                    self.remote_last_space_index = Some(index);
                     return;
                 }
                 if !self.remote_selection.insert(index) {
                     self.remote_selection.remove(&index);
                 }
-                self.remote_selection_anchor = Some(index);
+                if previous_anchor.is_none() {
+                    self.remote_selection_anchor = Some(index);
+                    self.remote_pending_anchor = None;
+                } else {
+                    self.remote_pending_anchor = Some(index);
+                }
                 self.remote_last_space_at = Some(Instant::now());
+                self.remote_last_space_index = Some(index);
             }
         }
     }
@@ -120,12 +158,16 @@ impl SftpPaneState {
             PaneSide::Local => {
                 self.local_selection.clear();
                 self.local_selection_anchor = None;
+                self.local_pending_anchor = None;
                 self.local_last_space_at = None;
+                self.local_last_space_index = None;
             }
             PaneSide::Remote => {
                 self.remote_selection.clear();
                 self.remote_selection_anchor = None;
+                self.remote_pending_anchor = None;
                 self.remote_last_space_at = None;
+                self.remote_last_space_index = None;
             }
         }
     }

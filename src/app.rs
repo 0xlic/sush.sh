@@ -3641,6 +3641,87 @@ mod tests {
     }
 
     #[test]
+    fn double_space_selects_range_after_moving_slowly_from_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+        ];
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(2));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.remote_selection.len(), 3);
+        assert!(pane.remote_selection.contains(&0));
+        assert!(pane.remote_selection.contains(&1));
+        assert!(pane.remote_selection.contains(&2));
+    }
+
+    #[test]
+    fn single_click_sets_anchor_for_next_range_without_reusing_old_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+            file_entry("d", false),
+            file_entry("e", false),
+            file_entry("f", false),
+        ];
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(2));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(4));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(5));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.remote_selection.contains(&0));
+        assert!(pane.remote_selection.contains(&1));
+        assert!(pane.remote_selection.contains(&2));
+        assert!(!pane.remote_selection.contains(&3));
+        assert!(pane.remote_selection.contains(&4));
+        assert!(pane.remote_selection.contains(&5));
+    }
+
+    #[test]
     fn batch_upload_uses_selected_local_entries() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("a.txt"), b"a").unwrap();
