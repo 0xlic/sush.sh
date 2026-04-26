@@ -1,5 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Color, Style};
 use ratatui::widgets::Paragraph;
 
 use crate::sftp::transfer::TransferProgress;
@@ -21,6 +22,14 @@ fn layout_mode_for_width(width: u16) -> SftpLayoutMode {
         SftpLayoutMode::DualPane
     } else {
         SftpLayoutMode::SinglePane
+    }
+}
+
+fn pane_focus_style(is_active: bool) -> Style {
+    if is_active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
     }
 }
 
@@ -64,6 +73,7 @@ pub fn render(
                 FileList {
                     entries,
                     title: label,
+                    chrome_style: pane_focus_style(true),
                 },
                 chunks[1],
                 list_state,
@@ -83,21 +93,14 @@ pub fn render(
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(chunks[1]);
-            let local_title = if pane.side == PaneSide::Local {
-                "Local *"
-            } else {
-                "Local"
-            };
-            let remote_title = if pane.side == PaneSide::Remote {
-                "Remote *"
-            } else {
-                "Remote"
-            };
+            let local_is_active = pane.side == PaneSide::Local;
+            let remote_is_active = pane.side == PaneSide::Remote;
 
             f.render_stateful_widget(
                 FileList {
                     entries: pane.local_entries.as_slice(),
-                    title: local_title,
+                    title: "Local",
+                    chrome_style: pane_focus_style(local_is_active),
                 },
                 panes[0],
                 &mut pane.local_list_state,
@@ -105,7 +108,8 @@ pub fn render(
             f.render_stateful_widget(
                 FileList {
                     entries: pane.remote_entries.as_slice(),
-                    title: remote_title,
+                    title: "Remote",
+                    chrome_style: pane_focus_style(remote_is_active),
                 },
                 panes[1],
                 &mut pane.remote_list_state,
@@ -144,7 +148,9 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
-    use super::{DUAL_PANE_MIN_WIDTH, SftpLayoutMode, layout_mode_for_width};
+    use ratatui::style::{Color, Style};
+
+    use super::{DUAL_PANE_MIN_WIDTH, SftpLayoutMode, layout_mode_for_width, pane_focus_style};
 
     #[test]
     fn wide_width_uses_dual_pane_layout() {
@@ -162,5 +168,11 @@ mod tests {
             layout_mode_for_width(DUAL_PANE_MIN_WIDTH),
             SftpLayoutMode::DualPane
         );
+    }
+
+    #[test]
+    fn active_pane_uses_highlighted_focus_style() {
+        assert_eq!(pane_focus_style(true), Style::default().fg(Color::Cyan));
+        assert_eq!(pane_focus_style(false), Style::default());
     }
 }

@@ -9,6 +9,7 @@ use crate::sftp::client::FileEntry;
 pub struct FileList<'a> {
     pub entries: &'a [FileEntry],
     pub title: &'a str,
+    pub chrome_style: Style,
 }
 
 impl<'a> StatefulWidget for FileList<'a> {
@@ -38,8 +39,16 @@ impl<'a> StatefulWidget for FileList<'a> {
                 ]))
             })
             .collect();
+        let title = Span::styled(
+            self.title.to_string(),
+            self.chrome_style.add_modifier(Modifier::BOLD),
+        );
         List::new(items)
-            .block(Block::bordered().title(self.title.to_string()))
+            .block(
+                Block::bordered()
+                    .border_style(self.chrome_style)
+                    .title(title),
+            )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .render(area, buf, state);
     }
