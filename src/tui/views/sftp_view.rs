@@ -8,6 +8,22 @@ use crate::tui::widgets::file_list::FileList;
 use crate::tui::widgets::progress_bar::ProgressView;
 use crate::tui::widgets::status_bar::StatusBar;
 
+const DUAL_PANE_MIN_WIDTH: u16 = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SftpLayoutMode {
+    SinglePane,
+    DualPane,
+}
+
+fn layout_mode_for_width(width: u16) -> SftpLayoutMode {
+    if width >= DUAL_PANE_MIN_WIDTH {
+        SftpLayoutMode::DualPane
+    } else {
+        SftpLayoutMode::SinglePane
+    }
+}
+
 pub fn render(
     f: &mut Frame,
     host_alias: &str,
@@ -15,6 +31,7 @@ pub fn render(
     transfer: Option<(&'static str, &TransferProgress)>,
     status_msg: Option<&str>,
 ) {
+    let layout_mode = layout_mode_for_width(f.area().width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -24,31 +41,77 @@ pub fn render(
         ])
         .split(f.area());
 
-    let (label, path) = match pane.side {
-        PaneSide::Local => ("Local", pane.local_path.display().to_string()),
-        PaneSide::Remote => ("Remote", pane.remote_path.clone()),
-    };
-    f.render_widget(
-        Paragraph::new(format!(" SFTP: {host_alias}  [{label}] {path}")),
-        chunks[0],
-    );
+    match layout_mode {
+        SftpLayoutMode::SinglePane => {
+            let (label, path) = match pane.side {
+                PaneSide::Local => ("Local", pane.local_path.display().to_string()),
+                PaneSide::Remote => ("Remote", pane.remote_path.clone()),
+            };
+            f.render_widget(
+                Paragraph::new(format!(" SFTP: {host_alias}  [{label}] {path}")),
+                chunks[0],
+            );
 
-    let entries = match pane.side {
-        PaneSide::Local => pane.local_entries.as_slice(),
-        PaneSide::Remote => pane.remote_entries.as_slice(),
-    };
-    let list_state = match pane.side {
-        PaneSide::Local => &mut pane.local_list_state,
-        PaneSide::Remote => &mut pane.remote_list_state,
-    };
-    f.render_stateful_widget(
-        FileList {
-            entries,
-            title: label,
-        },
-        chunks[1],
-        list_state,
-    );
+            let entries = match pane.side {
+                PaneSide::Local => pane.local_entries.as_slice(),
+                PaneSide::Remote => pane.remote_entries.as_slice(),
+            };
+            let list_state = match pane.side {
+                PaneSide::Local => &mut pane.local_list_state,
+                PaneSide::Remote => &mut pane.remote_list_state,
+            };
+            f.render_stateful_widget(
+                FileList {
+                    entries,
+                    title: label,
+                },
+                chunks[1],
+                list_state,
+            );
+        }
+        SftpLayoutMode::DualPane => {
+            f.render_widget(
+                Paragraph::new(format!(
+                    " SFTP: {host_alias}  [Local] {}  [Remote] {}",
+                    pane.local_path.display(),
+                    pane.remote_path
+                )),
+                chunks[0],
+            );
+
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(chunks[1]);
+            let local_title = if pane.side == PaneSide::Local {
+                "Local *"
+            } else {
+                "Local"
+            };
+            let remote_title = if pane.side == PaneSide::Remote {
+                "Remote *"
+            } else {
+                "Remote"
+            };
+
+            f.render_stateful_widget(
+                FileList {
+                    entries: pane.local_entries.as_slice(),
+                    title: local_title,
+                },
+                panes[0],
+                &mut pane.local_list_state,
+            );
+            f.render_stateful_widget(
+                FileList {
+                    entries: pane.remote_entries.as_slice(),
+                    title: remote_title,
+                },
+                panes[1],
+                &mut pane.remote_list_state,
+            );
+        }
+    }
 
     if let Some((verb, prog)) = transfer {
         f.render_widget(
@@ -64,7 +127,7 @@ pub fn render(
         f.render_widget(
             StatusBar {
                 hints: &[
-                    ("Tab", "Local/Remote"),
+                    ("Tab", "Focus"),
                     ("d", "Download"),
                     ("u", "Upload"),
                     ("e", "Edit"),
@@ -76,5 +139,20 @@ pub fn render(
             },
             chunks[2],
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SftpLayoutMode, layout_mode_for_width};
+
+    #[test]
+    fn wide_width_uses_dual_pane_layout() {
+        assert_eq!(layout_mode_for_width(140), SftpLayoutMode::DualPane);
+    }
+
+    #[test]
+    fn narrow_width_uses_single_active_pane_layout() {
+        assert_eq!(layout_mode_for_width(70), SftpLayoutMode::SinglePane);
     }
 }
