@@ -220,6 +220,38 @@ impl ConflictResolutionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureChoice {
+    Retry,
+    Skip,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+struct RecursiveFailureState {
+    file_name: String,
+    should_retry_current_file: bool,
+    should_skip_current_file: bool,
+    should_cancel_task: bool,
+}
+
+impl RecursiveFailureState {
+    fn for_file(file_name: &str) -> Self {
+        Self {
+            file_name: file_name.into(),
+            should_retry_current_file: false,
+            should_skip_current_file: false,
+            should_cancel_task: false,
+        }
+    }
+
+    fn apply(&mut self, choice: FailureChoice) {
+        self.should_retry_current_file = matches!(choice, FailureChoice::Retry);
+        self.should_skip_current_file = matches!(choice, FailureChoice::Skip);
+        self.should_cancel_task = matches!(choice, FailureChoice::Cancel);
+    }
+}
+
 pub struct App {
     pub mode: AppMode,
     pub hosts: Vec<Host>,
@@ -2826,5 +2858,27 @@ mod tests {
         let mut state = ConflictResolutionState::default();
         state.apply_choice(FileConflictChoice::Skip, false);
         assert_eq!(state.default_file_conflict, None);
+    }
+
+    #[test]
+    fn failure_prompt_retry_keeps_current_file() {
+        let mut state = RecursiveFailureState::for_file("a.txt");
+        state.apply(FailureChoice::Retry);
+        assert!(state.should_retry_current_file);
+    }
+
+    #[test]
+    fn failure_prompt_skip_advances_to_next_file() {
+        let mut state = RecursiveFailureState::for_file("a.txt");
+        state.apply(FailureChoice::Skip);
+        assert!(state.should_skip_current_file);
+    }
+
+    #[test]
+    fn failure_prompt_cancel_marks_task_cancelled() {
+        let mut state = RecursiveFailureState::for_file("a.txt");
+        assert_eq!(state.file_name, "a.txt");
+        state.apply(FailureChoice::Cancel);
+        assert!(state.should_cancel_task);
     }
 }
