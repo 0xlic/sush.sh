@@ -3387,6 +3387,58 @@ mod tests {
     }
 
     #[test]
+    fn double_space_selects_downward_range_from_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+        ];
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.sftp_pane.as_mut().unwrap().remote_list_state.select(Some(2));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.remote_selection.len(), 3);
+        assert!(pane.remote_selection.contains(&0));
+        assert!(pane.remote_selection.contains(&1));
+        assert!(pane.remote_selection.contains(&2));
+    }
+
+    #[test]
+    fn double_space_selects_upward_range_from_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+        ];
+        pane.local_list_state.select(Some(2));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.sftp_pane.as_mut().unwrap().local_list_state.select(Some(0));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.local_selection.len(), 3);
+        assert!(pane.local_selection.contains(&0));
+        assert!(pane.local_selection.contains(&1));
+        assert!(pane.local_selection.contains(&2));
+    }
+
+    #[test]
     fn polling_detects_changed_fingerprint() {
         let mut state = RemoteEditWatchState::new("old".into());
         assert!(state.should_upload("new"));

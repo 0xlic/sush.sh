@@ -29,6 +29,8 @@ pub struct SftpPaneState {
 }
 
 impl SftpPaneState {
+    const DOUBLE_SPACE_WINDOW_MS: u128 = 500;
+
     pub fn new(remote_home: String) -> Self {
         let mut local_list_state = ratatui::widgets::ListState::default();
         local_list_state.select(Some(0));
@@ -69,6 +71,20 @@ impl SftpPaneState {
         let index = self.selected_index();
         match self.side {
             PaneSide::Local => {
+                let is_double_space = self
+                    .local_last_space_at
+                    .is_some_and(|last| last.elapsed().as_millis() < Self::DOUBLE_SPACE_WINDOW_MS)
+                    && self.local_selection_anchor.is_some()
+                    && self.local_selection_anchor != Some(index);
+                if is_double_space {
+                    apply_range_selection(
+                        &mut self.local_selection,
+                        self.local_selection_anchor.unwrap(),
+                        index,
+                    );
+                    self.local_last_space_at = Some(Instant::now());
+                    return;
+                }
                 if !self.local_selection.insert(index) {
                     self.local_selection.remove(&index);
                 }
@@ -76,6 +92,20 @@ impl SftpPaneState {
                 self.local_last_space_at = Some(Instant::now());
             }
             PaneSide::Remote => {
+                let is_double_space = self
+                    .remote_last_space_at
+                    .is_some_and(|last| last.elapsed().as_millis() < Self::DOUBLE_SPACE_WINDOW_MS)
+                    && self.remote_selection_anchor.is_some()
+                    && self.remote_selection_anchor != Some(index);
+                if is_double_space {
+                    apply_range_selection(
+                        &mut self.remote_selection,
+                        self.remote_selection_anchor.unwrap(),
+                        index,
+                    );
+                    self.remote_last_space_at = Some(Instant::now());
+                    return;
+                }
                 if !self.remote_selection.insert(index) {
                     self.remote_selection.remove(&index);
                 }
@@ -99,4 +129,10 @@ impl SftpPaneState {
             }
         }
     }
+}
+
+fn apply_range_selection(selection: &mut BTreeSet<usize>, anchor: usize, current: usize) {
+    let start = anchor.min(current);
+    let end = anchor.max(current);
+    selection.extend(start..=end);
 }
