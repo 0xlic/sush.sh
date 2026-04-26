@@ -127,6 +127,7 @@ pub fn render(f: &mut Frame, state: &ImportViewState) {
                 ("Enter", "Import"),
                 ("ESC", "Cancel"),
             ],
+            transfer_badge: None,
         },
         status_area,
     );

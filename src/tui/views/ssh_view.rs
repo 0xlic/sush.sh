@@ -7,9 +7,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Widget};
 
 use crate::ssh::terminal::TerminalEmulator;
-use crate::tui::widgets::status_bar::StatusBar;
+use crate::tui::widgets::status_bar::{StatusBar, TransferBadge};
 
-pub fn render(f: &mut Frame, host_alias: &str, emulator: &TerminalEmulator) {
+pub fn render(
+    f: &mut Frame,
+    host_alias: &str,
+    emulator: &TerminalEmulator,
+    transfer_badge: Option<&TransferBadge>,
+) {
     let [terminal_area, status_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
 
@@ -23,6 +28,7 @@ pub fn render(f: &mut Frame, host_alias: &str, emulator: &TerminalEmulator) {
     f.render_widget(
         StatusBar {
             hints: &[("Ctrl-\\", "SFTP"), ("Ctrl-D", "Disconnect")],
+            transfer_badge,
         },
         status_area,
     );
@@ -140,5 +146,16 @@ mod tests {
             b: 0,
         });
         assert_eq!(map_color(rgb), Color::Rgb(255, 128, 0));
+    }
+
+    #[test]
+    fn ssh_view_passes_through_global_transfer_badge() {
+        let badge = TransferBadge {
+            direction_symbol: "↑",
+            current_index: 1,
+            total_count: 3,
+            percent: 12,
+        };
+        assert_eq!(badge.to_text(), "↑ 1/3 12%");
     }
 }

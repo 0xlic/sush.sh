@@ -1,9 +1,12 @@
+use std::collections::{VecDeque, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use std::io::{Stdout, stdout};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
@@ -16,7 +19,10 @@ use crate::config::secrets::{
 };
 use crate::config::store;
 use crate::sftp::client::{SftpClient, list_local};
-use crate::sftp::transfer::{TransferProgress, TransferState, download, upload};
+use crate::sftp::transfer::{
+    RecursiveAggregateProgress, RecursiveTransferPlan, TransferProgress, TransferState,
+    build_local_recursive_plan, build_remote_recursive_plan, download, upload,
+};
 use crate::sftp::{PaneSide, SftpPaneState};
 use crate::ssh::auth;
 use crate::ssh::session::{ActiveSession, try_key_auth};
@@ -29,7 +35,9 @@ use crate::tui::views::folder_view::{
 };
 use crate::tui::views::import_view::{self, ImportViewState};
 use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view, ssh_view};
-use crate::tui::widgets::confirm_dialog::ConfirmDialog;
+use crate::tui::widgets::confirm_dialog::{ChoiceDialog, ConfirmDialog};
+use crate::tui::widgets::status_bar::TransferBadge;
+use crate::utils::open;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainFocus {
@@ -60,13 +68,14 @@ enum LoopEvent {
 }
 
 /// Transfer direction determines which pane is refreshed after completion.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferDir {
     Download, // remote -> local, refresh local when done
     Upload,   // local -> remote, refresh remote when done
 }
 
 pub struct ActiveTransfer {
+    #[allow(dead_code)]
     pub verb: &'static str,
     pub dir: TransferDir,
     pub progress: TransferProgress,
@@ -74,6 +83,279 @@ pub struct ActiveTransfer {
     pub cancel: tokio_util::sync::CancellationToken,
     pub done_at: Option<Instant>,
     pub needs_refresh: bool, // true until the completion-triggered refresh runs
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueuedTransfer {
+    SingleFile {
+        dir: TransferDir,
+        display_name: String,
+        local_path: PathBuf,
+        remote_path: String,
+        total_bytes: u64,
+    },
+    Recursive {
+        display_name: String,
+        plan: RecursiveTransferPlan,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ActiveRecursiveTransfer {
+    plan: RecursiveTransferPlan,
+    progress: RecursiveAggregateProgress,
+    directories_prepared: bool,
+    next_file_index: usize,
+}
+
+impl ActiveRecursiveTransfer {
+    fn new(plan: RecursiveTransferPlan) -> Self {
+        let total_files = plan.files.len();
+        Self {
+            plan,
+            progress: RecursiveAggregateProgress::new(total_files),
+            directories_prepared: false,
+            next_file_index: 0,
+        }
+    }
+
+    fn mark_file_pending(&mut self, file_name: &str, total_bytes: u64) {
+        self.progress.start_file(file_name.into(), total_bytes);
+    }
+
+    fn update_current_file_bytes(&mut self, transferred_bytes: u64) {
+        self.progress.update_bytes(transferred_bytes);
+    }
+
+    fn finish_pending_file(&mut self) {
+        self.progress.finish_file();
+        self.next_file_index += 1;
+    }
+
+    #[allow(dead_code)]
+    fn skip_pending_file(&mut self) {
+        self.finish_pending_file();
+    }
+
+    fn pending_file(&self) -> Option<&crate::sftp::transfer::PlannedFile> {
+        self.plan.files.get(self.next_file_index)
+    }
+
+    fn current_file_position(&self) -> usize {
+        (self.next_file_index + 1).min(self.progress.total_files.max(1))
+    }
+
+    fn is_complete(&self) -> bool {
+        self.next_file_index >= self.plan.files.len()
+    }
+
+    fn sync_transfer_progress(&self, progress: &mut TransferProgress) {
+        progress.current_file_index = self.current_file_position();
+        progress.total_files = self.progress.total_files.max(1);
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteEditSyncState {
+    Opening,
+    Watching,
+    Uploading,
+    UploadFailed,
+    Closed,
+}
+
+#[allow(dead_code)]
+struct RemoteEditSession {
+    remote_path: String,
+    local_path: PathBuf,
+    workspace: tempfile::TempDir,
+    last_uploaded_fingerprint: String,
+    last_seen_fingerprint: String,
+    sync_state: RemoteEditSyncState,
+    last_error: Option<String>,
+    watch_state: RemoteEditWatchState,
+    watcher: Option<RecommendedWatcher>,
+    watch_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+}
+
+impl RemoteEditSession {
+    fn with_runtime(
+        remote_path: String,
+        local_path: PathBuf,
+        workspace: tempfile::TempDir,
+        initial_fingerprint: String,
+        watcher: Option<RecommendedWatcher>,
+        watch_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    ) -> Self {
+        Self {
+            remote_path,
+            local_path,
+            workspace,
+            last_uploaded_fingerprint: initial_fingerprint.clone(),
+            last_seen_fingerprint: initial_fingerprint.clone(),
+            sync_state: RemoteEditSyncState::Opening,
+            last_error: None,
+            watch_state: RemoteEditWatchState::new(initial_fingerprint.clone()),
+            watcher,
+            watch_rx,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(remote_path: String, local_path: PathBuf, initial_fingerprint: String) -> Self {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            remote_path,
+            local_path,
+            workspace: tempfile::tempdir().unwrap(),
+            last_uploaded_fingerprint: initial_fingerprint.clone(),
+            last_seen_fingerprint: initial_fingerprint.clone(),
+            sync_state: RemoteEditSyncState::Opening,
+            last_error: None,
+            watch_state: RemoteEditWatchState::new(initial_fingerprint),
+            watcher: None,
+            watch_rx: rx,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn mark_watching(&mut self) {
+        self.sync_state = RemoteEditSyncState::Watching;
+        self.last_error = None;
+    }
+
+    #[allow(dead_code)]
+    fn mark_uploading(&mut self) {
+        self.sync_state = RemoteEditSyncState::Uploading;
+    }
+
+    fn mark_upload_failed(&mut self, error: String) {
+        self.sync_state = RemoteEditSyncState::UploadFailed;
+        self.last_error = Some(error);
+    }
+
+    #[allow(dead_code)]
+    fn mark_uploaded(&mut self, fingerprint: String) {
+        self.last_uploaded_fingerprint = fingerprint.clone();
+        self.last_seen_fingerprint = fingerprint;
+        self.sync_state = RemoteEditSyncState::Watching;
+        self.last_error = None;
+    }
+
+    fn should_upload(&mut self, fingerprint: &str) -> bool {
+        self.last_seen_fingerprint = fingerprint.to_string();
+        self.watch_state.should_upload(fingerprint) && self.last_uploaded_fingerprint != fingerprint
+    }
+
+    fn display_name(&self) -> String {
+        Path::new(&self.remote_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.remote_path.clone())
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct RemoteEditWatchState {
+    last_observed_fingerprint: String,
+}
+
+impl RemoteEditWatchState {
+    fn new(initial_fingerprint: String) -> Self {
+        Self {
+            last_observed_fingerprint: initial_fingerprint,
+        }
+    }
+
+    fn should_upload(&mut self, fingerprint: &str) -> bool {
+        if self.last_observed_fingerprint == fingerprint {
+            return false;
+        }
+        self.last_observed_fingerprint = fingerprint.to_string();
+        true
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileConflictChoice {
+    Skip,
+    Overwrite,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+struct ConflictResolutionState {
+    default_file_conflict: Option<FileConflictChoice>,
+}
+
+#[allow(dead_code)]
+impl ConflictResolutionState {
+    fn apply_choice(&mut self, choice: FileConflictChoice, apply_to_remaining: bool) {
+        self.default_file_conflict = apply_to_remaining.then_some(choice);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecursiveConflictPrompt {
+    file_name: String,
+    apply_to_remaining: bool,
+}
+
+impl RecursiveConflictPrompt {
+    fn new(file_name: String) -> Self {
+        Self {
+            file_name,
+            apply_to_remaining: false,
+        }
+    }
+
+    fn toggle_apply_to_remaining(&mut self) {
+        self.apply_to_remaining = !self.apply_to_remaining;
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureChoice {
+    Retry,
+    Skip,
+    Cancel,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct RecursiveFailureState {
+    file_name: String,
+    should_retry_current_file: bool,
+    should_skip_current_file: bool,
+    should_cancel_task: bool,
+}
+
+#[allow(dead_code)]
+impl RecursiveFailureState {
+    fn for_file(file_name: &str) -> Self {
+        Self {
+            file_name: file_name.into(),
+            should_retry_current_file: false,
+            should_skip_current_file: false,
+            should_cancel_task: false,
+        }
+    }
+
+    fn apply(&mut self, choice: FailureChoice) {
+        self.should_retry_current_file = matches!(choice, FailureChoice::Retry);
+        self.should_skip_current_file = matches!(choice, FailureChoice::Skip);
+        self.should_cancel_task = matches!(choice, FailureChoice::Cancel);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SftpDeleteConfirmState {
+    side: PaneSide,
+    selected_count: usize,
 }
 
 pub struct App {
@@ -91,6 +373,8 @@ pub struct App {
     pub trigger_pane_enter: bool,
     pub trigger_download: bool,
     pub trigger_upload: bool,
+    pub trigger_sftp_delete: bool,
+    pub trigger_remote_edit: bool,
     pub trigger_refresh_local: bool,
     pub trigger_refresh_remote: bool,
     pub trigger_ssh_resume: bool,
@@ -100,12 +384,22 @@ pub struct App {
     pub sftp_pane: Option<SftpPaneState>,
     pub current_host_alias: Option<String>,
     pub active_transfer: Option<ActiveTransfer>,
+    pub queued_transfers: VecDeque<QueuedTransfer>,
+    queue_completed_count: usize,
+    queue_total_count: usize,
+    active_recursive_transfer: Option<ActiveRecursiveTransfer>,
+    conflict_resolution: ConflictResolutionState,
+    recursive_conflict_prompt: Option<RecursiveConflictPrompt>,
+    recursive_failure_prompt: Option<RecursiveFailureState>,
+    #[allow(dead_code)]
+    remote_edit_session: Option<RemoteEditSession>,
     pub last_ctrl_c: Option<Instant>,
     pub ssh_last_size: Option<(u16, u16)>,
     pub terminal_emulator: Option<TerminalEmulator>,
     pub edit_draft: Option<EditDraft>,
     pub import_state: Option<ImportViewState>,
     pub confirm_delete: bool,
+    sftp_delete_confirm: Option<SftpDeleteConfirmState>,
     pub import_prompted: bool,
     pub metadata: store::Metadata,
     pub connection_history: ConnectionHistory,
@@ -151,6 +445,8 @@ impl App {
             trigger_pane_enter: false,
             trigger_download: false,
             trigger_upload: false,
+            trigger_sftp_delete: false,
+            trigger_remote_edit: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
             trigger_ssh_resume: false,
@@ -160,12 +456,21 @@ impl App {
             sftp_pane: None,
             current_host_alias: None,
             active_transfer: None,
+            queued_transfers: VecDeque::new(),
+            queue_completed_count: 0,
+            queue_total_count: 0,
+            active_recursive_transfer: None,
+            conflict_resolution: ConflictResolutionState::default(),
+            recursive_conflict_prompt: None,
+            recursive_failure_prompt: None,
+            remote_edit_session: None,
             last_ctrl_c: None,
             ssh_last_size: None,
             terminal_emulator: None,
             edit_draft: None,
             import_state: None,
             confirm_delete: false,
+            sftp_delete_confirm: None,
             import_prompted,
             metadata,
             connection_history,
@@ -200,6 +505,49 @@ impl App {
         if has_ssh_hosts {
             self.show_import_prompt = true;
         }
+    }
+
+    pub fn global_transfer_badge(&self) -> Option<TransferBadge> {
+        let direction = if let Some(active) = &self.active_transfer {
+            active.dir
+        } else if let Some(recursive) = &self.active_recursive_transfer {
+            recursive.plan.dir
+        } else {
+            return None;
+        };
+        let direction_symbol = match direction {
+            TransferDir::Upload => "\u{2191}",
+            TransferDir::Download => "\u{2193}",
+        };
+        let percent = self
+            .active_transfer
+            .as_ref()
+            .map(|active| {
+                active
+                    .progress
+                    .transferred_bytes
+                    .saturating_mul(100)
+                    .checked_div(active.progress.total_bytes)
+                    .unwrap_or(0)
+                    .min(100) as u8
+            })
+            .unwrap_or(0);
+
+        let total_count = self.queue_total_count.max(
+            self.queue_completed_count
+                + self.queued_transfers.len()
+                + usize::from(
+                    self.active_transfer.is_some() || self.active_recursive_transfer.is_some(),
+                ),
+        );
+        let current_index = (self.queue_completed_count + 1).min(total_count.max(1));
+
+        Some(TransferBadge {
+            direction_symbol,
+            current_index,
+            total_count: total_count.max(1),
+            percent,
+        })
     }
 
     async fn event_loop(
@@ -274,6 +622,20 @@ impl App {
                 }
             }
 
+            if self.trigger_sftp_delete {
+                self.trigger_sftp_delete = false;
+                if let Err(e) = self.start_sftp_delete().await {
+                    eprintln!("[Delete error: {e}]");
+                }
+            }
+
+            if self.trigger_remote_edit {
+                self.trigger_remote_edit = false;
+                if let Err(e) = self.start_remote_edit().await {
+                    self.set_status(format!("Remote edit failed: {e}"));
+                }
+            }
+
             // Refresh the local directory after a transfer completes.
             if self.trigger_refresh_local {
                 self.trigger_refresh_local = false;
@@ -307,36 +669,7 @@ impl App {
                 }
             }
 
-            // Poll transfer progress.
-            if let Some(tr) = &mut self.active_transfer {
-                while let Ok(prog) = tr.rx.try_recv() {
-                    tr.progress = prog;
-                }
-                let done = matches!(
-                    tr.progress.state,
-                    TransferState::Completed | TransferState::Failed(_) | TransferState::Cancelled
-                );
-                if done {
-                    // Trigger the pane refresh only once when completion is first observed.
-                    if tr.needs_refresh {
-                        tr.needs_refresh = false;
-                        match tr.dir {
-                            TransferDir::Download => self.trigger_refresh_local = true,
-                            TransferDir::Upload => self.trigger_refresh_remote = true,
-                        }
-                    }
-                    if tr.done_at.is_none() {
-                        tr.done_at = Some(Instant::now());
-                    }
-                    if tr
-                        .done_at
-                        .map(|t| t.elapsed().as_secs() >= 3)
-                        .unwrap_or(false)
-                    {
-                        self.active_transfer = None;
-                    }
-                }
-            }
+            self.poll_transfer_queue().await?;
 
             self.render(terminal)?;
 
@@ -388,9 +721,10 @@ impl App {
                 self.leave_ssh_mode(terminal).await?;
             }
         }
+        self.poll_remote_edit().await?;
         // Clear status message after 4 seconds.
         if let Some((_, since)) = &self.status_msg
-            && since.elapsed() >= std::time::Duration::from_secs(4)
+            && since.elapsed() >= Duration::from_secs(4)
         {
             self.status_msg = None;
         }
@@ -478,8 +812,20 @@ impl App {
             self.handle_confirm_delete(k);
             return;
         }
+        if self.sftp_delete_confirm.is_some() {
+            self.handle_sftp_delete_confirm(k);
+            return;
+        }
         if self.show_import_prompt {
             self.handle_import_prompt_key(k);
+            return;
+        }
+        if self.recursive_conflict_prompt.is_some() {
+            self.handle_recursive_conflict_key(k);
+            return;
+        }
+        if self.recursive_failure_prompt.is_some() {
+            self.handle_recursive_failure_key(k);
             return;
         }
         match self.mode {
@@ -657,7 +1003,11 @@ impl App {
                 if let Some(last) = self.last_ctrl_c
                     && last.elapsed().as_millis() < 500
                 {
-                    self.exit_sftp();
+                    if self.remote_edit_session.is_some() {
+                        self.set_status("Finish remote editing before leaving SFTP".into());
+                    } else {
+                        self.exit_sftp();
+                    }
                     return;
                 }
                 self.last_ctrl_c = Some(now);
@@ -665,10 +1015,28 @@ impl App {
                     tr.cancel.cancel();
                 }
             }
-            (KeyCode::Char('q'), KeyModifiers::NONE) => self.exit_sftp(),
+            (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                if self.remote_edit_session.is_some() {
+                    self.set_status("Finish remote editing before leaving SFTP".into());
+                } else {
+                    self.exit_sftp();
+                }
+            }
+            (KeyCode::Esc, KeyModifiers::NONE) => {
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.clear_active_selection();
+                }
+            }
             _ if is_switch_key(k) => self.trigger_ssh_resume = true,
+            (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.toggle_active_selection();
+                }
+            }
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
+            (KeyCode::Char('D'), KeyModifiers::NONE) => self.trigger_sftp_delete_confirm(),
+            (KeyCode::Char('e'), KeyModifiers::NONE) => self.trigger_remote_edit(),
             // D delete and r rename are not implemented yet.
             (KeyCode::Tab, _) => self.toggle_pane(),
             (KeyCode::Up, _) => self.pane_select_prev(),
@@ -678,12 +1046,68 @@ impl App {
         }
     }
 
+    fn trigger_remote_edit(&mut self) {
+        let Some(pane) = &self.sftp_pane else {
+            return;
+        };
+        if pane.side != PaneSide::Remote {
+            self.set_status("Remote edit only works from the remote pane".into());
+            return;
+        }
+        let idx = pane.selected_index();
+        let Some(entry) = pane.remote_entries.get(idx) else {
+            return;
+        };
+        if entry.is_dir {
+            self.set_status("Remote edit only works for files".into());
+            return;
+        }
+        self.trigger_remote_edit = true;
+    }
+
+    fn trigger_sftp_delete_confirm(&mut self) {
+        let Some(pane) = &self.sftp_pane else {
+            return;
+        };
+        let selected_count = match pane.side {
+            PaneSide::Local => pane.local_selection.len(),
+            PaneSide::Remote => pane.remote_selection.len(),
+        };
+        if selected_count == 0 {
+            return;
+        }
+        self.sftp_delete_confirm = Some(SftpDeleteConfirmState {
+            side: pane.side,
+            selected_count,
+        });
+    }
+
     fn exit_sftp(&mut self) {
+        self.sftp_delete_confirm = None;
+        self.mode = AppMode::Main;
+    }
+
+    fn clear_transfer_queue(&mut self) {
+        if let Some(transfer) = &self.active_transfer {
+            transfer.cancel.cancel();
+        }
+        self.active_transfer = None;
+        self.active_recursive_transfer = None;
+        self.queued_transfers.clear();
+        self.queue_completed_count = 0;
+        self.queue_total_count = 0;
+        self.recursive_conflict_prompt = None;
+        self.recursive_failure_prompt = None;
+        self.conflict_resolution = ConflictResolutionState::default();
+    }
+
+    fn clear_connection_state(&mut self) {
+        self.clear_transfer_queue();
         self.sftp_client = None;
         self.sftp_pane = None;
-        self.active_transfer = None;
+        self.remote_edit_session = None;
         self.current_host_alias = None;
-        self.mode = AppMode::Main;
+        self.sftp_delete_confirm = None;
     }
 
     fn toggle_pane(&mut self) {
@@ -692,14 +1116,14 @@ impl App {
                 PaneSide::Local => PaneSide::Remote,
                 PaneSide::Remote => PaneSide::Local,
             };
-            pane.list_state.select(Some(0));
         }
     }
 
     fn pane_select_prev(&mut self) {
         if let Some(pane) = &mut self.sftp_pane {
-            let i = pane.list_state.selected().unwrap_or(0);
-            pane.list_state.select(Some(i.saturating_sub(1)));
+            let i = pane.selected_index();
+            pane.active_list_state_mut()
+                .select(Some(i.saturating_sub(1)));
         }
     }
 
@@ -712,8 +1136,9 @@ impl App {
             if len == 0 {
                 return;
             }
-            let i = pane.list_state.selected().unwrap_or(0);
-            pane.list_state.select(Some((i + 1).min(len - 1)));
+            let i = pane.selected_index();
+            pane.active_list_state_mut()
+                .select(Some((i + 1).min(len - 1)));
         }
     }
 
@@ -838,6 +1263,244 @@ impl App {
 
     fn set_status(&mut self, msg: String) {
         self.status_msg = Some((msg, Instant::now()));
+    }
+
+    fn normalize_queue_counters(&mut self) {
+        if self.active_transfer.is_none()
+            && self.active_recursive_transfer.is_none()
+            && self.queued_transfers.is_empty()
+        {
+            self.queue_completed_count = 0;
+            self.queue_total_count = 0;
+        }
+    }
+
+    async fn enqueue_transfers(&mut self, transfers: Vec<QueuedTransfer>) -> Result<()> {
+        if transfers.is_empty() {
+            return Ok(());
+        }
+
+        let was_idle = self.active_transfer.is_none()
+            && self.active_recursive_transfer.is_none()
+            && self.queued_transfers.is_empty();
+        if was_idle {
+            self.queue_completed_count = 0;
+            self.queue_total_count = transfers.len();
+        } else {
+            self.queue_total_count += transfers.len();
+        }
+        self.queued_transfers.extend(transfers);
+
+        if was_idle {
+            self.start_next_queued_transfer().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn poll_transfer_queue(&mut self) -> Result<()> {
+        let mut recursive_result = None;
+        if let Some(tr) = &mut self.active_transfer {
+            while let Ok(mut prog) = tr.rx.try_recv() {
+                if let Some(recursive) = self.active_recursive_transfer.as_ref() {
+                    recursive.sync_transfer_progress(&mut prog);
+                }
+                tr.progress = prog;
+            }
+            let done = matches!(
+                tr.progress.state,
+                TransferState::Completed | TransferState::Failed(_) | TransferState::Cancelled
+            );
+            if done && self.active_recursive_transfer.is_some() {
+                recursive_result = Some(tr.progress.clone());
+            } else if done {
+                if tr.needs_refresh {
+                    tr.needs_refresh = false;
+                    match tr.dir {
+                        TransferDir::Download => self.trigger_refresh_local = true,
+                        TransferDir::Upload => self.trigger_refresh_remote = true,
+                    }
+                }
+                if tr.done_at.is_none() {
+                    tr.done_at = Some(Instant::now());
+                }
+                if tr
+                    .done_at
+                    .map(|t| t.elapsed().as_secs() >= 3)
+                    .unwrap_or(false)
+                {
+                    self.queue_completed_count += 1;
+                    self.active_transfer = None;
+                }
+            }
+        }
+        if let Some(progress) = recursive_result {
+            let was_terminal = matches!(
+                progress.state,
+                TransferState::Completed | TransferState::Cancelled
+            );
+            self.active_transfer = None;
+            self.handle_recursive_transfer_result(progress);
+            if was_terminal && self.active_recursive_transfer.is_none() {
+                self.queue_completed_count += 1;
+            }
+        }
+        if self.active_transfer.is_none() {
+            self.poll_recursive_transfer().await?;
+            if self.active_transfer.is_none() && self.active_recursive_transfer.is_none() {
+                self.start_next_queued_transfer().await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn start_next_queued_transfer(&mut self) -> Result<()> {
+        if self.active_transfer.is_some() || self.active_recursive_transfer.is_some() {
+            return Ok(());
+        }
+
+        let Some(transfer) = self.queued_transfers.pop_front() else {
+            self.normalize_queue_counters();
+            return Ok(());
+        };
+
+        match transfer {
+            QueuedTransfer::SingleFile {
+                dir,
+                display_name,
+                local_path,
+                remote_path,
+                total_bytes,
+            } => {
+                let session = self.open_transfer_session().await?;
+                let (verb, handle) = match dir {
+                    TransferDir::Download => (
+                        "Downloading",
+                        download(session, remote_path, local_path, total_bytes),
+                    ),
+                    TransferDir::Upload => ("Uploading", upload(session, local_path, remote_path)?),
+                };
+                self.active_transfer = Some(ActiveTransfer {
+                    verb,
+                    dir,
+                    progress: TransferProgress {
+                        filename: display_name,
+                        total_bytes,
+                        transferred_bytes: 0,
+                        state: TransferState::InProgress,
+                        current_file_index: 1,
+                        total_files: 1,
+                    },
+                    rx: handle.rx,
+                    cancel: handle.cancel,
+                    done_at: None,
+                    needs_refresh: true,
+                });
+            }
+            QueuedTransfer::Recursive { display_name, plan } => {
+                self.conflict_resolution = ConflictResolutionState::default();
+                self.recursive_conflict_prompt = None;
+                self.recursive_failure_prompt = None;
+                self.active_recursive_transfer = Some(ActiveRecursiveTransfer::new(plan));
+                self.set_status(format!("Started background transfer for {display_name}"));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn start_remote_edit(&mut self) -> Result<()> {
+        let Some(pane) = &self.sftp_pane else {
+            return Ok(());
+        };
+        if pane.side != PaneSide::Remote {
+            return Ok(());
+        }
+        let idx = pane.selected_index();
+        let Some(entry) = pane.remote_entries.get(idx).cloned() else {
+            return Ok(());
+        };
+        if entry.is_dir {
+            self.set_status("Recursive remote directory download is not wired yet".into());
+            return Ok(());
+        }
+        let remote_path = format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
+        let workspace = tempfile::tempdir()?;
+        let local_path = workspace.path().join(&entry.name);
+
+        let Some(client) = &self.sftp_client else {
+            return Ok(());
+        };
+        client
+            .download_file_to_path(&remote_path, &local_path)
+            .await?;
+
+        let initial_fingerprint = fingerprint_file(&local_path)?;
+        let (watcher, watch_rx) = start_remote_edit_watcher(workspace.path())?;
+        open::open_path(&local_path)?;
+
+        let mut session = RemoteEditSession::with_runtime(
+            remote_path,
+            local_path,
+            workspace,
+            initial_fingerprint,
+            Some(watcher),
+            watch_rx,
+        );
+        session.mark_watching();
+        let file_name = session.display_name();
+        self.remote_edit_session = Some(session);
+        self.set_status(format!("Opened {file_name} for local editing"));
+        Ok(())
+    }
+
+    async fn poll_remote_edit(&mut self) -> Result<()> {
+        let Some(mut session) = self.remote_edit_session.take() else {
+            return Ok(());
+        };
+
+        while session.watch_rx.try_recv().is_ok() {}
+
+        let fingerprint = match fingerprint_file(&session.local_path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                session.mark_upload_failed(error.to_string());
+                self.set_status(format!("Remote edit file is unavailable: {error}"));
+                self.remote_edit_session = Some(session);
+                return Ok(());
+            }
+        };
+
+        if session.should_upload(&fingerprint) {
+            session.mark_uploading();
+            let file_name = session.display_name();
+            let upload_result = if let Some(client) = &self.sftp_client {
+                client
+                    .upload_file_from_path(&session.local_path, &session.remote_path)
+                    .await
+            } else {
+                bail!("SFTP session is not available")
+            };
+
+            match upload_result {
+                Ok(()) => {
+                    session.mark_uploaded(fingerprint);
+                    self.trigger_refresh_remote = true;
+                    self.set_status(format!("Uploaded {file_name}"));
+                }
+                Err(error) => {
+                    session.mark_upload_failed(error.to_string());
+                    self.set_status(format!("Auto upload failed: {error}"));
+                }
+            }
+        }
+
+        self.remote_edit_session = Some(session);
+        Ok(())
+    }
+
+    fn remote_edit_status(&self) -> Option<&str> {
+        self.status_msg.as_ref().map(|(msg, _)| msg.as_str())
     }
 
     fn reset_probe(&mut self) {
@@ -1081,6 +1744,19 @@ impl App {
         }
     }
 
+    fn handle_sftp_delete_confirm(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.sftp_delete_confirm = None;
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.sftp_delete_confirm = None;
+                self.trigger_sftp_delete = true;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_import_prompt_key(&mut self, k: KeyEvent) {
         match k.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1092,6 +1768,66 @@ impl App {
                 self.import_prompted = true;
                 self.save_hosts_to_disk();
             }
+        }
+    }
+
+    fn handle_recursive_conflict_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if let Some(prompt) = self.recursive_conflict_prompt.as_mut() {
+                    prompt.toggle_apply_to_remaining();
+                }
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                self.apply_recursive_conflict_choice(FileConflictChoice::Overwrite);
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.apply_recursive_conflict_choice(FileConflictChoice::Skip);
+            }
+            KeyCode::Esc => {
+                self.recursive_conflict_prompt = None;
+                self.active_recursive_transfer = None;
+                self.set_status("Recursive transfer cancelled".into());
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_recursive_conflict_choice(&mut self, choice: FileConflictChoice) {
+        let Some(prompt) = self.recursive_conflict_prompt.take() else {
+            return;
+        };
+        self.conflict_resolution
+            .apply_choice(choice, prompt.apply_to_remaining);
+        if matches!(choice, FileConflictChoice::Skip)
+            && let Some(transfer) = self.active_recursive_transfer.as_mut()
+        {
+            transfer.skip_pending_file();
+        }
+    }
+
+    fn handle_recursive_failure_key(&mut self, k: KeyEvent) {
+        let choice = match k.code {
+            KeyCode::Char('r') | KeyCode::Char('R') => Some(FailureChoice::Retry),
+            KeyCode::Char('s') | KeyCode::Char('S') => Some(FailureChoice::Skip),
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => Some(FailureChoice::Cancel),
+            _ => None,
+        };
+        let Some(choice) = choice else {
+            return;
+        };
+        let Some(mut state) = self.recursive_failure_prompt.take() else {
+            return;
+        };
+        state.apply(choice);
+        if state.should_skip_current_file
+            && let Some(transfer) = self.active_recursive_transfer.as_mut()
+        {
+            transfer.skip_pending_file();
+        }
+        if state.should_cancel_task {
+            self.active_recursive_transfer = None;
+            self.set_status("Recursive transfer cancelled".into());
         }
     }
 
@@ -1548,7 +2284,7 @@ impl App {
         let Some(pane) = &mut self.sftp_pane else {
             return Ok(());
         };
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.selected_index();
 
         match pane.side {
             PaneSide::Remote => {
@@ -1573,7 +2309,7 @@ impl App {
                                 let pane = self.sftp_pane.as_mut().unwrap();
                                 pane.remote_path = new_path;
                                 pane.remote_entries = entries;
-                                pane.list_state.select(Some(0));
+                                pane.remote_list_state.select(Some(0));
                             }
                             Err(e) => eprintln!("[List directory failed: {e}]"),
                         }
@@ -1599,7 +2335,7 @@ impl App {
                             let pane = self.sftp_pane.as_mut().unwrap();
                             pane.local_path = new_path;
                             pane.local_entries = entries;
-                            pane.list_state.select(Some(0));
+                            pane.local_list_state.select(Some(0));
                         }
                         Err(e) => eprintln!("[List local directory failed: {e}]"),
                     }
@@ -1609,97 +2345,459 @@ impl App {
         Ok(())
     }
 
+    async fn poll_recursive_transfer(&mut self) -> Result<()> {
+        if self.active_transfer.is_some()
+            || self.active_recursive_transfer.is_none()
+            || self.recursive_conflict_prompt.is_some()
+            || self.recursive_failure_prompt.is_some()
+        {
+            return Ok(());
+        }
+
+        if self
+            .active_recursive_transfer
+            .as_ref()
+            .is_some_and(|transfer| !transfer.directories_prepared)
+        {
+            self.prepare_recursive_transfer_directories().await?;
+        }
+
+        let Some(transfer) = self.active_recursive_transfer.as_ref() else {
+            return Ok(());
+        };
+        if transfer.is_complete() {
+            let dir = transfer.plan.dir;
+            let name = transfer
+                .plan
+                .source_root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| transfer.plan.destination_root.clone());
+            self.active_recursive_transfer = None;
+            match dir {
+                TransferDir::Download => self.trigger_refresh_local = true,
+                TransferDir::Upload => self.trigger_refresh_remote = true,
+            }
+            self.set_status(format!("Recursive transfer completed for {name}"));
+            return Ok(());
+        }
+
+        self.start_next_recursive_file().await
+    }
+
+    async fn prepare_recursive_transfer_directories(&mut self) -> Result<()> {
+        let Some(transfer) = self.active_recursive_transfer.as_ref() else {
+            return Ok(());
+        };
+        let dir = transfer.plan.dir;
+        let destination_root = transfer.plan.destination_root.clone();
+        let directories = transfer.plan.directories.clone();
+
+        match dir {
+            TransferDir::Download => {
+                std::fs::create_dir_all(&destination_root)?;
+                for directory in directories {
+                    std::fs::create_dir_all(
+                        PathBuf::from(&destination_root).join(directory.relative_path),
+                    )?;
+                }
+            }
+            TransferDir::Upload => {
+                let Some(client) = &self.sftp_client else {
+                    return Ok(());
+                };
+                ensure_remote_directory(client, &destination_root).await?;
+                for directory in directories {
+                    let remote_path =
+                        append_remote_relative_path(&destination_root, &directory.relative_path);
+                    ensure_remote_directory(client, &remote_path).await?;
+                }
+            }
+        }
+
+        if let Some(transfer) = self.active_recursive_transfer.as_mut() {
+            transfer.directories_prepared = true;
+        }
+        Ok(())
+    }
+
+    async fn start_next_recursive_file(&mut self) -> Result<()> {
+        let Some(transfer) = self.active_recursive_transfer.as_ref() else {
+            return Ok(());
+        };
+        let Some(file) = transfer.pending_file().cloned() else {
+            return Ok(());
+        };
+        let dir = transfer.plan.dir;
+        let source_root = transfer.plan.source_root.clone();
+        let destination_root = transfer.plan.destination_root.clone();
+        let current_file_index = transfer.current_file_position();
+        let total_files = transfer.progress.total_files.max(1);
+        let file_name = file
+            .relative_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.relative_path.to_string_lossy().into_owned());
+
+        if self
+            .pending_recursive_file_has_conflict(dir, &destination_root, &file.relative_path)
+            .await?
+        {
+            if let Some(choice) = self.conflict_resolution.default_file_conflict {
+                if matches!(choice, FileConflictChoice::Skip) {
+                    if let Some(transfer) = self.active_recursive_transfer.as_mut() {
+                        transfer.skip_pending_file();
+                    }
+                    return Ok(());
+                }
+            } else {
+                self.recursive_conflict_prompt = Some(RecursiveConflictPrompt::new(file_name));
+                return Ok(());
+            }
+        }
+
+        if let Some(transfer) = self.active_recursive_transfer.as_mut() {
+            transfer.mark_file_pending(&file_name, file.size);
+        }
+
+        let session = self.open_transfer_session().await?;
+        let (verb, handle) = match dir {
+            TransferDir::Download => {
+                let remote_src = append_remote_relative_path(
+                    &source_root.to_string_lossy(),
+                    &file.relative_path,
+                );
+                let local_dest = PathBuf::from(&destination_root).join(&file.relative_path);
+                (
+                    "Downloading",
+                    download(session, remote_src, local_dest, file.size),
+                )
+            }
+            TransferDir::Upload => {
+                let local_src = source_root.join(&file.relative_path);
+                let remote_dest =
+                    append_remote_relative_path(&destination_root, &file.relative_path);
+                ("Uploading", upload(session, local_src, remote_dest)?)
+            }
+        };
+
+        let init_prog = TransferProgress {
+            filename: file_name,
+            total_bytes: file.size,
+            transferred_bytes: 0,
+            state: TransferState::InProgress,
+            current_file_index,
+            total_files,
+        };
+        self.active_transfer = Some(ActiveTransfer {
+            verb,
+            dir,
+            progress: init_prog,
+            rx: handle.rx,
+            cancel: handle.cancel,
+            done_at: None,
+            needs_refresh: false,
+        });
+        Ok(())
+    }
+
+    fn handle_recursive_transfer_result(&mut self, progress: TransferProgress) {
+        let Some(transfer) = self.active_recursive_transfer.as_mut() else {
+            return;
+        };
+        transfer.update_current_file_bytes(progress.transferred_bytes);
+
+        match progress.state {
+            TransferState::Completed => {
+                transfer.finish_pending_file();
+            }
+            TransferState::Failed(error) => {
+                self.recursive_failure_prompt =
+                    Some(RecursiveFailureState::for_file(&progress.filename));
+                self.set_status(format!(
+                    "Recursive transfer paused on {}: {error}",
+                    progress.filename
+                ));
+            }
+            TransferState::Cancelled => {
+                let dir = transfer.plan.dir;
+                self.active_recursive_transfer = None;
+                match dir {
+                    TransferDir::Download => self.trigger_refresh_local = true,
+                    TransferDir::Upload => self.trigger_refresh_remote = true,
+                }
+                self.set_status("Recursive transfer cancelled".into());
+            }
+            TransferState::InProgress => {}
+        }
+    }
+
+    async fn pending_recursive_file_has_conflict(
+        &self,
+        dir: TransferDir,
+        destination_root: &str,
+        relative_path: &Path,
+    ) -> Result<bool> {
+        match dir {
+            TransferDir::Download => {
+                Ok(PathBuf::from(destination_root).join(relative_path).exists())
+            }
+            TransferDir::Upload => {
+                let Some(client) = &self.sftp_client else {
+                    return Ok(false);
+                };
+                let remote_path = append_remote_relative_path(destination_root, relative_path);
+                Ok(client.session.metadata(remote_path).await.is_ok())
+            }
+        }
+    }
+
+    async fn open_transfer_session(&self) -> Result<russh_sftp::client::SftpSession> {
+        let Some(session) = &self.active_session else {
+            bail!("missing active SSH session for transfer");
+        };
+        let ch = session.handle.channel_open_session().await?;
+        ch.request_subsystem(true, "sftp").await?;
+        Ok(russh_sftp::client::SftpSession::new(ch.into_stream()).await?)
+    }
+
+    fn queued_single_file_transfer(
+        &self,
+        dir: TransferDir,
+        display_name: String,
+        local_path: PathBuf,
+        remote_path: String,
+        total_bytes: u64,
+    ) -> QueuedTransfer {
+        QueuedTransfer::SingleFile {
+            dir,
+            display_name,
+            local_path,
+            remote_path,
+            total_bytes,
+        }
+    }
+
+    fn queued_recursive_transfer(
+        &self,
+        display_name: String,
+        plan: RecursiveTransferPlan,
+    ) -> QueuedTransfer {
+        QueuedTransfer::Recursive { display_name, plan }
+    }
+
     async fn start_download(&mut self) -> Result<()> {
+        let queued = {
+            let Some(pane) = &self.sftp_pane else {
+                return Ok(());
+            };
+            if pane.side != PaneSide::Remote || pane.remote_selection.is_empty() {
+                None
+            } else {
+                let selected_entries = pane
+                    .remote_selection
+                    .iter()
+                    .filter_map(|index| pane.remote_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+                let selected_count = selected_entries.len();
+                let mut queued = Vec::new();
+                for entry in selected_entries {
+                    if entry.is_dir {
+                        let Some(client) = &self.sftp_client else {
+                            continue;
+                        };
+                        let remote_src =
+                            format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
+                        let plan =
+                            build_remote_recursive_plan(client, &remote_src, &pane.local_path)
+                                .await?;
+                        queued.push(self.queued_recursive_transfer(entry.name.clone(), plan));
+                    } else {
+                        queued.push(self.queued_single_file_transfer(
+                            TransferDir::Download,
+                            entry.name.clone(),
+                            pane.local_path.join(&entry.name),
+                            format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name),
+                            entry.size,
+                        ));
+                    }
+                }
+                Some((selected_count, queued))
+            }
+        };
+        if let Some((selected_count, transfers)) = queued {
+            if let Some(pane) = &mut self.sftp_pane {
+                pane.clear_active_selection();
+            }
+            self.enqueue_transfers(transfers).await?;
+            self.set_status(format!("Queued batch download for {selected_count} items"));
+            return Ok(());
+        }
+
         let Some(pane) = &self.sftp_pane else {
             return Ok(());
         };
         if pane.side != PaneSide::Remote {
             return Ok(());
         }
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.remote_list_state.selected().unwrap_or(0);
         let Some(entry) = pane.remote_entries.get(idx).cloned() else {
             return Ok(());
         };
         if entry.is_dir {
+            let Some(client) = &self.sftp_client else {
+                return Ok(());
+            };
+            let remote_src = format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
+            let plan = build_remote_recursive_plan(client, &remote_src, &pane.local_path).await?;
+            self.enqueue_transfers(vec![
+                self.queued_recursive_transfer(entry.name.clone(), plan),
+            ])
+            .await?;
+            self.set_status(format!("Queued recursive download for {}", entry.name));
             return Ok(());
         }
 
-        let remote_path = format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
-        let local_dest = pane.local_path.join(&entry.name);
-        let total = entry.size;
-
-        let sftp_session = {
-            let Some(session) = &self.active_session else {
-                return Ok(());
-            };
-            let ch = session.handle.channel_open_session().await?;
-            ch.request_subsystem(true, "sftp").await?;
-            russh_sftp::client::SftpSession::new(ch.into_stream()).await?
-        };
-
-        let handle = download(sftp_session, remote_path, local_dest, total);
-        let init_prog = TransferProgress {
-            filename: entry.name.clone(),
-            total_bytes: total,
-            transferred_bytes: 0,
-            state: TransferState::InProgress,
-        };
-        self.active_transfer = Some(ActiveTransfer {
-            verb: "Downloading",
-            dir: TransferDir::Download,
-            progress: init_prog,
-            rx: handle.rx,
-            cancel: handle.cancel,
-            done_at: None,
-            needs_refresh: true,
-        });
+        self.enqueue_transfers(vec![self.queued_single_file_transfer(
+            TransferDir::Download,
+            entry.name.clone(),
+            pane.local_path.join(&entry.name),
+            format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name),
+            entry.size,
+        )])
+        .await?;
         Ok(())
     }
 
     async fn start_upload(&mut self) -> Result<()> {
+        let queued = {
+            let Some(pane) = &self.sftp_pane else {
+                return Ok(());
+            };
+            if pane.side != PaneSide::Local || pane.local_selection.is_empty() {
+                None
+            } else {
+                let selected_entries = pane
+                    .local_selection
+                    .iter()
+                    .filter_map(|index| pane.local_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+                let selected_count = selected_entries.len();
+                let mut queued = Vec::new();
+                for entry in selected_entries {
+                    if entry.is_dir {
+                        let local_src = pane.local_path.join(&entry.name);
+                        let plan = build_local_recursive_plan(&local_src, &pane.remote_path)?;
+                        queued.push(self.queued_recursive_transfer(entry.name.clone(), plan));
+                    } else {
+                        queued.push(self.queued_single_file_transfer(
+                            TransferDir::Upload,
+                            entry.name.clone(),
+                            pane.local_path.join(&entry.name),
+                            format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name),
+                            entry.size,
+                        ));
+                    }
+                }
+                Some((selected_count, queued))
+            }
+        };
+        if let Some((selected_count, transfers)) = queued {
+            if let Some(pane) = &mut self.sftp_pane {
+                pane.clear_active_selection();
+            }
+            self.enqueue_transfers(transfers).await?;
+            self.set_status(format!("Queued batch upload for {selected_count} items"));
+            return Ok(());
+        }
+
         let Some(pane) = &self.sftp_pane else {
             return Ok(());
         };
         if pane.side != PaneSide::Local {
             return Ok(());
         }
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.local_list_state.selected().unwrap_or(0);
         let Some(entry) = pane.local_entries.get(idx).cloned() else {
             return Ok(());
         };
         if entry.is_dir {
+            let local_src = pane.local_path.join(&entry.name);
+            let plan = build_local_recursive_plan(&local_src, &pane.remote_path)?;
+            self.enqueue_transfers(vec![
+                self.queued_recursive_transfer(entry.name.clone(), plan),
+            ])
+            .await?;
+            self.set_status(format!("Queued recursive upload for {}", entry.name));
             return Ok(());
         }
 
-        let local_src = pane.local_path.join(&entry.name);
-        let remote_dest = format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
+        self.enqueue_transfers(vec![self.queued_single_file_transfer(
+            TransferDir::Upload,
+            entry.name.clone(),
+            pane.local_path.join(&entry.name),
+            format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name),
+            entry.size,
+        )])
+        .await?;
+        Ok(())
+    }
 
-        let sftp_session = {
-            let Some(session) = &self.active_session else {
-                return Ok(());
-            };
-            let ch = session.handle.channel_open_session().await?;
-            ch.request_subsystem(true, "sftp").await?;
-            russh_sftp::client::SftpSession::new(ch.into_stream()).await?
+    async fn start_sftp_delete(&mut self) -> Result<()> {
+        let Some(pane) = &self.sftp_pane else {
+            return Ok(());
         };
 
-        let handle = upload(sftp_session, local_src, remote_dest)?;
-        let total = entry.size;
-        let init_prog = TransferProgress {
-            filename: entry.name.clone(),
-            total_bytes: total,
-            transferred_bytes: 0,
-            state: TransferState::InProgress,
-        };
-        self.active_transfer = Some(ActiveTransfer {
-            verb: "Uploading",
-            dir: TransferDir::Upload,
-            progress: init_prog,
-            rx: handle.rx,
-            cancel: handle.cancel,
-            done_at: None,
-            needs_refresh: true,
-        });
+        match pane.side {
+            PaneSide::Local => {
+                let selected_entries = pane
+                    .local_selection
+                    .iter()
+                    .filter_map(|index| pane.local_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+
+                for entry in &selected_entries {
+                    let path = pane.local_path.join(&entry.name);
+                    if entry.is_dir {
+                        std::fs::remove_dir_all(&path)?;
+                    } else {
+                        std::fs::remove_file(&path)?;
+                    }
+                }
+
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.clear_active_selection();
+                }
+                self.trigger_refresh_local = true;
+                self.set_status(format!("Deleted {} local item(s)", selected_entries.len()));
+            }
+            PaneSide::Remote => {
+                let selected_entries = pane
+                    .remote_selection
+                    .iter()
+                    .filter_map(|index| pane.remote_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+
+                let Some(client) = &self.sftp_client else {
+                    bail!("missing SFTP client for remote delete");
+                };
+
+                for entry in &selected_entries {
+                    let remote_path =
+                        format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
+                    client
+                        .remove_path_recursive(&remote_path, entry.is_dir)
+                        .await?;
+                }
+
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.clear_active_selection();
+                }
+                self.trigger_refresh_remote = true;
+                self.set_status(format!("Deleted {} remote item(s)", selected_entries.len()));
+            }
+        }
+
         Ok(())
     }
 
@@ -1873,7 +2971,8 @@ impl App {
 
     async fn resume_ssh_from_sftp(&mut self) -> Result<()> {
         let Some(session) = self.active_session.as_mut() else {
-            self.exit_sftp();
+            self.clear_connection_state();
+            self.mode = AppMode::Main;
             return Ok(());
         };
 
@@ -1936,9 +3035,7 @@ impl App {
         if let Some(session) = self.active_session.take() {
             let _ = session.disconnect().await;
         }
-        self.sftp_client = None;
-        self.sftp_pane = None;
-        self.current_host_alias = None;
+        self.clear_connection_state();
         self.mode = AppMode::Main;
         Ok(())
     }
@@ -1991,20 +3088,74 @@ impl App {
                 }
             }
             AppMode::Sftp => {
+                let status_msg = self.remote_edit_status().map(str::to_owned);
+                let transfer_badge = self.global_transfer_badge();
                 if let Some(pane) = &mut self.sftp_pane {
                     let alias = self.current_host_alias.as_deref().unwrap_or("");
-                    let transfer_info =
-                        self.active_transfer.as_ref().map(|t| (t.verb, &t.progress));
-                    sftp_view::render(f, alias, pane, transfer_info);
+                    sftp_view::render(
+                        f,
+                        alias,
+                        pane,
+                        status_msg.as_deref(),
+                        transfer_badge.as_ref(),
+                    );
                 }
                 if let Some(pwd) = &self.pwd_dialog {
                     pwd.dialog.render(f);
                 }
+                if let Some(prompt) = &self.recursive_conflict_prompt {
+                    let apply_label = if prompt.apply_to_remaining {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    ChoiceDialog {
+                        title: "File Conflict",
+                        message: &format!(
+                            "Conflict on {}. Toggle apply-to-remaining: {apply_label}",
+                            prompt.file_name
+                        ),
+                        hints: vec![
+                            ("o", "Overwrite"),
+                            ("s", "Skip"),
+                            ("a", "Apply"),
+                            ("Esc", "Cancel"),
+                        ],
+                    }
+                    .render(f);
+                }
+                if let Some(prompt) = &self.recursive_failure_prompt {
+                    ChoiceDialog {
+                        title: "Transfer Failed",
+                        message: &format!(
+                            "File {} failed during recursive transfer",
+                            prompt.file_name
+                        ),
+                        hints: vec![("r", "Retry"), ("s", "Skip"), ("c/Esc", "Cancel")],
+                    }
+                    .render(f);
+                }
+                if let Some(confirm) = self.sftp_delete_confirm {
+                    let scope = match confirm.side {
+                        PaneSide::Local => "local",
+                        PaneSide::Remote => "remote",
+                    };
+                    ChoiceDialog {
+                        title: "Delete Selected",
+                        message: &format!(
+                            "Delete {} selected {scope} item(s)?",
+                            confirm.selected_count
+                        ),
+                        hints: vec![("y", "Delete"), ("n/Esc", "Cancel")],
+                    }
+                    .render(f);
+                }
             }
             AppMode::Ssh => {
+                let transfer_badge = self.global_transfer_badge();
                 if let Some(emulator) = &self.terminal_emulator {
                     let alias = self.current_host_alias.as_deref().unwrap_or("");
-                    ssh_view::render(f, alias, emulator);
+                    ssh_view::render(f, alias, emulator, transfer_badge.as_ref());
                 }
             }
             AppMode::Edit => {
@@ -2043,6 +3194,59 @@ impl App {
         self.list_state = list_state;
         Ok(())
     }
+}
+
+fn start_remote_edit_watcher(
+    path: &Path,
+) -> Result<(RecommendedWatcher, tokio::sync::mpsc::UnboundedReceiver<()>)> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if result.is_ok() {
+            let _ = tx.send(());
+        }
+    })?;
+    watcher.watch(path, RecursiveMode::NonRecursive)?;
+    Ok((watcher, rx))
+}
+
+fn append_remote_relative_path(base: &str, relative: &Path) -> String {
+    let child = relative.to_string_lossy().replace('\\', "/");
+    match base {
+        "/" => format!("/{child}"),
+        _ if base.ends_with('/') => format!("{base}{child}"),
+        _ => format!("{base}/{child}"),
+    }
+}
+
+async fn ensure_remote_directory(client: &SftpClient, path: &str) -> Result<()> {
+    if client.session.metadata(path).await.is_ok() {
+        return Ok(());
+    }
+
+    match client.session.create_dir(path).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if client.session.metadata(path).await.is_ok() {
+                Ok(())
+            } else {
+                Err(Into::into(error))
+            }
+        }
+    }
+}
+
+fn fingerprint_file(path: &Path) -> Result<String> {
+    let data = std::fs::read(path)?;
+    let metadata = std::fs::metadata(path)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .unwrap_or(Duration::ZERO)
+        .as_millis();
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    Ok(format!("{}:{modified}:{}", data.len(), hasher.finish()))
 }
 
 const SWITCH_SEQ: &[u8] = b"\x1c";
@@ -2213,6 +3417,8 @@ mod tests {
             trigger_pane_enter: false,
             trigger_download: false,
             trigger_upload: false,
+            trigger_sftp_delete: false,
+            trigger_remote_edit: false,
             trigger_refresh_local: false,
             trigger_refresh_remote: false,
             trigger_ssh_resume: false,
@@ -2222,12 +3428,21 @@ mod tests {
             sftp_pane: None,
             current_host_alias: None,
             active_transfer: None,
+            queued_transfers: VecDeque::new(),
+            queue_completed_count: 0,
+            queue_total_count: 0,
+            active_recursive_transfer: None,
+            conflict_resolution: ConflictResolutionState::default(),
+            recursive_conflict_prompt: None,
+            recursive_failure_prompt: None,
+            remote_edit_session: None,
             last_ctrl_c: None,
             ssh_last_size: None,
             terminal_emulator: None,
             edit_draft: None,
             import_state: None,
             confirm_delete: false,
+            sftp_delete_confirm: None,
             import_prompted: false,
             metadata: Metadata::default(),
             connection_history: ConnectionHistory::load(std::path::PathBuf::from(
@@ -2272,6 +3487,98 @@ mod tests {
             tags: vec![],
             description: String::new(),
             source: HostSource::Manual,
+        }
+    }
+
+    fn app_with_sftp_pane(side: PaneSide, entries: Vec<crate::sftp::client::FileEntry>) -> App {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = side;
+        match side {
+            PaneSide::Local => pane.local_entries = entries,
+            PaneSide::Remote => pane.remote_entries = entries,
+        }
+        match side {
+            PaneSide::Local => pane.local_list_state.select(Some(0)),
+            PaneSide::Remote => pane.remote_list_state.select(Some(0)),
+        }
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+        app
+    }
+
+    fn file_entry(name: &str, is_dir: bool) -> crate::sftp::client::FileEntry {
+        crate::sftp::client::FileEntry {
+            name: name.into(),
+            is_dir,
+            size: 0,
+        }
+    }
+
+    fn active_transfer_for_test(
+        dir: TransferDir,
+        transferred_bytes: u64,
+        total_bytes: u64,
+    ) -> ActiveTransfer {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        ActiveTransfer {
+            verb: match dir {
+                TransferDir::Download => "Downloading",
+                TransferDir::Upload => "Uploading",
+            },
+            dir,
+            progress: TransferProgress {
+                filename: "file.txt".into(),
+                total_bytes,
+                transferred_bytes,
+                state: TransferState::InProgress,
+                current_file_index: 1,
+                total_files: 1,
+            },
+            rx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            done_at: None,
+            needs_refresh: false,
+        }
+    }
+
+    fn completed_transfer_for_test(dir: TransferDir) -> ActiveTransfer {
+        let mut transfer = active_transfer_for_test(dir, 100, 100);
+        transfer.progress.state = TransferState::Completed;
+        transfer.done_at = Some(Instant::now() - Duration::from_secs(4));
+        transfer
+    }
+
+    fn queued_file_upload_for_test(name: &str) -> QueuedTransfer {
+        QueuedTransfer::SingleFile {
+            dir: TransferDir::Upload,
+            display_name: name.into(),
+            local_path: PathBuf::from(format!("/tmp/{name}")),
+            remote_path: format!("/remote/{name}"),
+            total_bytes: 1,
+        }
+    }
+
+    fn queued_file_download_for_test(name: &str) -> QueuedTransfer {
+        QueuedTransfer::SingleFile {
+            dir: TransferDir::Download,
+            display_name: name.into(),
+            local_path: PathBuf::from(format!("/tmp/{name}")),
+            remote_path: format!("/remote/{name}"),
+            total_bytes: 1,
+        }
+    }
+
+    fn queued_recursive_upload_for_test(name: &str) -> QueuedTransfer {
+        QueuedTransfer::Recursive {
+            display_name: name.into(),
+            plan: RecursiveTransferPlan {
+                dir: TransferDir::Upload,
+                source_root: PathBuf::from(format!("/tmp/{name}")),
+                destination_root: format!("/remote/{name}"),
+                directories: vec![],
+                files: vec![],
+            },
         }
     }
 
@@ -2366,5 +3673,844 @@ mod tests {
         assert!(title.contains("Password was not saved last time"));
         assert!(title.contains("permission denied by system keyring"));
         assert!(title.contains("Key passphrase (/Users/me/.ssh/id_ed25519):"));
+    }
+
+    #[test]
+    fn remote_edit_session_starts_in_opening_state() {
+        let session = RemoteEditSession::for_test(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        assert_eq!(session.sync_state, RemoteEditSyncState::Opening);
+        assert_eq!(session.last_uploaded_fingerprint, "hash-1");
+        assert_eq!(session.last_seen_fingerprint, "hash-1");
+    }
+
+    #[test]
+    fn failed_upload_keeps_session_active() {
+        let mut session = RemoteEditSession::for_test(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        session.mark_upload_failed("network error".into());
+        assert_eq!(session.sync_state, RemoteEditSyncState::UploadFailed);
+        assert_eq!(session.last_error.as_deref(), Some("network error"));
+    }
+
+    #[test]
+    fn pressing_e_in_remote_pane_triggers_remote_edit() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Remote,
+            vec![crate::sftp::client::FileEntry {
+                name: "hosts".into(),
+                is_dir: false,
+                size: 12,
+            }],
+        );
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.trigger_remote_edit);
+    }
+
+    #[test]
+    fn pressing_e_in_local_pane_does_not_trigger_remote_edit() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Local,
+            vec![crate::sftp::client::FileEntry {
+                name: "hosts".into(),
+                is_dir: false,
+                size: 12,
+            }],
+        );
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(!app.trigger_remote_edit);
+    }
+
+    #[test]
+    fn pressing_e_on_remote_directory_does_not_trigger_remote_edit() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Remote,
+            vec![crate::sftp::client::FileEntry {
+                name: "etc".into(),
+                is_dir: true,
+                size: 0,
+            }],
+        );
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(!app.trigger_remote_edit);
+    }
+
+    #[test]
+    fn pressing_q_with_active_remote_edit_does_not_exit_sftp() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Remote,
+            vec![crate::sftp::client::FileEntry {
+                name: "hosts".into(),
+                is_dir: false,
+                size: 12,
+            }],
+        );
+        app.remote_edit_session = Some(RemoteEditSession::for_test(
+            "/remote/hosts".into(),
+            PathBuf::from("/tmp/hosts"),
+            "hash-1".into(),
+        ));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('q')));
+        assert_eq!(app.mode, AppMode::Sftp);
+        assert!(app.sftp_pane.is_some());
+        assert!(app.status_msg.is_some());
+    }
+
+    #[test]
+    fn tab_switches_active_pane_without_resetting_local_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.remote_entries = vec![file_entry("r1.txt", false), file_entry("r2.txt", false)];
+        pane.local_list_state.select(Some(1));
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Tab));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.side, PaneSide::Local);
+        assert_eq!(pane.local_list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn switching_to_remote_preserves_remote_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.remote_entries = vec![file_entry("r1.txt", false), file_entry("r2.txt", false)];
+        pane.local_list_state.select(Some(0));
+        pane.remote_list_state.select(Some(1));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Tab));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.side, PaneSide::Remote);
+        assert_eq!(pane.remote_list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn pane_select_next_moves_only_active_pane_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.remote_entries = vec![file_entry("r1.txt", false), file_entry("r2.txt", false)];
+        pane.local_list_state.select(Some(0));
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.pane_select_next();
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.remote_list_state.selected(), Some(1));
+        assert_eq!(pane.local_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn space_toggles_active_local_entry_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.local_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.contains(&0));
+        assert_eq!(pane.local_selection_anchor, Some(0));
+    }
+
+    #[test]
+    fn esc_clears_active_remote_multi_select() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![file_entry("r1.txt", false)];
+        pane.remote_selection.insert(0);
+        pane.remote_selection_anchor = Some(0);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.remote_selection.is_empty());
+        assert_eq!(pane.remote_selection_anchor, None);
+    }
+
+    #[test]
+    fn double_space_selects_downward_range_from_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+        ];
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(2));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.remote_selection.len(), 3);
+        assert!(pane.remote_selection.contains(&0));
+        assert!(pane.remote_selection.contains(&1));
+        assert!(pane.remote_selection.contains(&2));
+    }
+
+    #[test]
+    fn double_space_selects_upward_range_from_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+        ];
+        pane.local_list_state.select(Some(2));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .local_list_state
+            .select(Some(0));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.local_selection.len(), 3);
+        assert!(pane.local_selection.contains(&0));
+        assert!(pane.local_selection.contains(&1));
+        assert!(pane.local_selection.contains(&2));
+    }
+
+    #[test]
+    fn double_space_selects_range_after_moving_slowly_from_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+        ];
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(2));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.remote_selection.len(), 3);
+        assert!(pane.remote_selection.contains(&0));
+        assert!(pane.remote_selection.contains(&1));
+        assert!(pane.remote_selection.contains(&2));
+    }
+
+    #[test]
+    fn single_click_sets_anchor_for_next_range_without_reusing_old_anchor() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![
+            file_entry("a", false),
+            file_entry("b", false),
+            file_entry("c", false),
+            file_entry("d", false),
+            file_entry("e", false),
+            file_entry("f", false),
+        ];
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(2));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(4));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        app.sftp_pane
+            .as_mut()
+            .unwrap()
+            .remote_list_state
+            .select(Some(5));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.remote_selection.contains(&0));
+        assert!(pane.remote_selection.contains(&1));
+        assert!(pane.remote_selection.contains(&2));
+        assert!(!pane.remote_selection.contains(&3));
+        assert!(pane.remote_selection.contains(&4));
+        assert!(pane.remote_selection.contains(&5));
+    }
+
+    #[test]
+    fn queue_counts_include_active_and_pending_items() {
+        let mut app = app_with(vec![]);
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Upload, 25, 100));
+        app.queued_transfers
+            .push_back(queued_file_upload_for_test("b.txt"));
+        app.queued_transfers
+            .push_back(queued_file_upload_for_test("c.txt"));
+
+        let badge = app.global_transfer_badge().unwrap();
+
+        assert_eq!(badge.direction_symbol, "↑");
+        assert_eq!(badge.current_index, 1);
+        assert_eq!(badge.total_count, 3);
+        assert_eq!(badge.percent, 25);
+    }
+
+    #[test]
+    fn queue_badge_uses_queue_position_instead_of_recursive_file_position() {
+        let mut app = app_with(vec![]);
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Download, 50, 100));
+        app.queue_completed_count = 1;
+        app.queue_total_count = 4;
+        app.active_transfer
+            .as_mut()
+            .unwrap()
+            .progress
+            .current_file_index = 2;
+        app.active_transfer.as_mut().unwrap().progress.total_files = 10;
+
+        let badge = app.global_transfer_badge().unwrap();
+
+        assert_eq!(badge.direction_symbol, "↓");
+        assert_eq!(badge.current_index, 2);
+        assert_eq!(badge.total_count, 4);
+        assert_eq!(badge.percent, 50);
+    }
+
+    #[test]
+    fn queue_badge_percent_uses_resumed_progress_bytes() {
+        let mut app = app_with(vec![]);
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Download, 40, 100));
+
+        let badge = app.global_transfer_badge().unwrap();
+
+        assert_eq!(badge.percent, 40);
+    }
+
+    #[tokio::test]
+    async fn busy_upload_request_is_enqueued_instead_of_replacing_active_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(temp.path().join("b.txt"), b"b").unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_path = temp.path().to_path_buf();
+        pane.local_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.local_selection.extend([0, 1]);
+        app.mode = AppMode::Sftp;
+        app.sftp_pane = Some(pane);
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Upload, 10, 100));
+        app.queue_total_count = 1;
+
+        app.start_upload().await.unwrap();
+
+        assert!(app.active_transfer.is_some());
+        assert_eq!(app.queued_transfers.len(), 2);
+        assert_eq!(app.queue_total_count, 3);
+    }
+
+    #[tokio::test]
+    async fn busy_download_request_is_enqueued_instead_of_replacing_active_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.local_path = temp.path().to_path_buf();
+        pane.remote_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.remote_selection.extend([0, 1]);
+        app.mode = AppMode::Sftp;
+        app.sftp_pane = Some(pane);
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Download, 10, 100));
+        app.queue_total_count = 1;
+
+        app.start_download().await.unwrap();
+
+        assert!(app.active_transfer.is_some());
+        assert_eq!(app.queued_transfers.len(), 2);
+        assert_eq!(app.queue_total_count, 3);
+    }
+
+    #[test]
+    fn completed_transfer_starts_next_queued_job() {
+        let mut app = app_with(vec![]);
+        app.active_transfer = Some(completed_transfer_for_test(TransferDir::Upload));
+        app.queued_transfers
+            .push_back(queued_recursive_upload_for_test("next-dir"));
+        app.queue_total_count = 2;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.poll_transfer_queue()).unwrap();
+
+        assert!(app.active_recursive_transfer.is_some());
+        assert!(app.queued_transfers.is_empty());
+        let badge = app.global_transfer_badge().unwrap();
+        assert_eq!(badge.current_index, 2);
+        assert_eq!(badge.total_count, 2);
+    }
+
+    #[test]
+    fn leaving_sftp_does_not_stop_background_queue() {
+        let mut app = app_with(vec![]);
+        app.mode = AppMode::Sftp;
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Download, 10, 100));
+        app.queued_transfers
+            .push_back(queued_file_download_for_test("next.txt"));
+
+        app.exit_sftp();
+
+        assert_eq!(app.mode, AppMode::Main);
+        assert!(app.active_transfer.is_some());
+        assert_eq!(app.queued_transfers.len(), 1);
+    }
+
+    #[test]
+    fn leaving_connection_clears_background_transfer_queue() {
+        let mut app = app_with(vec![]);
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Upload, 10, 100));
+        app.queued_transfers
+            .push_back(queued_file_upload_for_test("next.txt"));
+        app.queue_total_count = 2;
+
+        app.clear_connection_state();
+
+        assert!(app.active_transfer.is_none());
+        assert!(app.queued_transfers.is_empty());
+        assert_eq!(app.queue_total_count, 0);
+    }
+
+    #[test]
+    fn batch_upload_uses_selected_local_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(temp.path().join("b.txt"), b"b").unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_path = temp.path().to_path_buf();
+        pane.local_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.local_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Upload, 10, 100));
+        app.queue_total_count = 1;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_upload()).unwrap();
+
+        assert!(app.active_transfer.is_some());
+        assert_eq!(app.queue_total_count, 3);
+        assert_eq!(app.queued_transfers.len(), 2);
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.is_empty());
+        assert_eq!(pane.local_selection_anchor, None);
+    }
+
+    #[test]
+    fn batch_download_uses_selected_remote_entries() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.local_path = temp.path().to_path_buf();
+        pane.remote_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.remote_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Download, 10, 100));
+        app.queue_total_count = 1;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_download()).unwrap();
+
+        assert!(app.active_transfer.is_some());
+        assert_eq!(app.queue_total_count, 3);
+        assert_eq!(app.queued_transfers.len(), 2);
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.remote_selection.is_empty());
+        assert_eq!(pane.remote_selection_anchor, None);
+    }
+
+    #[test]
+    fn batch_delete_uses_selected_remote_entries() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.remote_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('D')));
+
+        assert!(app.sftp_delete_confirm.is_some());
+    }
+
+    #[test]
+    fn esc_clears_multi_select_without_leaving_sftp() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.local_selection.insert(0);
+        pane.local_selection_anchor = Some(0);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        assert_eq!(app.mode, AppMode::Sftp);
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.is_empty());
+        assert_eq!(pane.local_selection_anchor, None);
+    }
+
+    #[test]
+    fn confirming_batch_delete_removes_selected_local_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(temp.path().join("b.txt"), b"b").unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_path = temp.path().to_path_buf();
+        pane.local_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.local_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.trigger_sftp_delete_confirm();
+        app.handle_sftp_delete_confirm(KeyEvent::from(KeyCode::Char('y')));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_sftp_delete()).unwrap();
+
+        assert!(!temp.path().join("a.txt").exists());
+        assert!(!temp.path().join("b.txt").exists());
+        assert!(app.sftp_delete_confirm.is_none());
+        assert!(app.trigger_refresh_local);
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.is_empty());
+        assert_eq!(pane.local_selection_anchor, None);
+    }
+
+    #[test]
+    fn polling_detects_changed_fingerprint() {
+        let mut state = RemoteEditWatchState::new("old".into());
+        assert!(state.should_upload("new"));
+        assert!(!state.should_upload("new"));
+    }
+
+    #[test]
+    fn repeated_same_fingerprint_does_not_reupload() {
+        let mut session = RemoteEditSession::for_test(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        assert!(session.should_upload("hash-2"));
+        session.mark_uploaded("hash-2".into());
+        assert!(!session.should_upload("hash-2"));
+    }
+
+    #[test]
+    fn failed_upload_retries_after_next_change() {
+        let mut session = RemoteEditSession::for_test(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        assert!(session.should_upload("hash-2"));
+        session.mark_upload_failed("timeout".into());
+        assert!(session.should_upload("hash-3"));
+    }
+
+    #[test]
+    fn conflict_prompt_accepts_overwrite_for_remaining_files() {
+        let mut state = ConflictResolutionState::default();
+        state.apply_choice(FileConflictChoice::Overwrite, true);
+        assert_eq!(
+            state.default_file_conflict,
+            Some(FileConflictChoice::Overwrite)
+        );
+    }
+
+    #[test]
+    fn conflict_prompt_accepts_skip_without_default() {
+        let mut state = ConflictResolutionState::default();
+        state.apply_choice(FileConflictChoice::Skip, false);
+        assert_eq!(state.default_file_conflict, None);
+    }
+
+    #[test]
+    fn failure_prompt_retry_keeps_current_file() {
+        let mut state = RecursiveFailureState::for_file("a.txt");
+        state.apply(FailureChoice::Retry);
+        assert!(state.should_retry_current_file);
+    }
+
+    #[test]
+    fn failure_prompt_skip_advances_to_next_file() {
+        let mut state = RecursiveFailureState::for_file("a.txt");
+        state.apply(FailureChoice::Skip);
+        assert!(state.should_skip_current_file);
+    }
+
+    #[test]
+    fn failure_prompt_cancel_marks_task_cancelled() {
+        let mut state = RecursiveFailureState::for_file("a.txt");
+        assert_eq!(state.file_name, "a.txt");
+        state.apply(FailureChoice::Cancel);
+        assert!(state.should_cancel_task);
+    }
+
+    #[test]
+    fn uploading_selected_directory_starts_recursive_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("foo")).unwrap();
+        std::fs::write(temp.path().join("foo/a.txt"), b"a").unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_path = temp.path().to_path_buf();
+        pane.local_entries = vec![crate::sftp::client::FileEntry {
+            name: "foo".into(),
+            is_dir: true,
+            size: 0,
+        }];
+        pane.local_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_upload()).unwrap();
+
+        assert!(app.active_recursive_transfer.is_some());
+        assert_eq!(
+            app.active_recursive_transfer
+                .as_ref()
+                .unwrap()
+                .plan
+                .destination_root,
+            "/remote/foo"
+        );
+    }
+
+    #[test]
+    fn recursive_transfer_skip_advances_aggregate_progress() {
+        let plan = RecursiveTransferPlan::upload(
+            PathBuf::from("/local/foo"),
+            "/remote".into(),
+            vec![],
+            vec![crate::sftp::transfer::PlannedFile {
+                relative_path: PathBuf::from("a.txt"),
+                size: 10,
+            }],
+        );
+
+        let mut transfer = ActiveRecursiveTransfer::new(plan);
+        transfer.mark_file_pending("a.txt", 10);
+        transfer.skip_pending_file();
+
+        assert_eq!(transfer.progress.current_file_index, 1);
+        assert_eq!(transfer.next_file_index, 1);
+        assert!(transfer.progress.current_file_name.is_none());
+    }
+
+    #[test]
+    fn recursive_transfer_tracks_current_file_bytes() {
+        let plan = RecursiveTransferPlan::upload(
+            PathBuf::from("/local/foo"),
+            "/remote".into(),
+            vec![],
+            vec![crate::sftp::transfer::PlannedFile {
+                relative_path: PathBuf::from("a.txt"),
+                size: 10,
+            }],
+        );
+
+        let mut transfer = ActiveRecursiveTransfer::new(plan);
+        transfer.mark_file_pending("a.txt", 10);
+        transfer.update_current_file_bytes(4);
+
+        assert_eq!(
+            transfer.progress.current_file_name.as_deref(),
+            Some("a.txt")
+        );
+        assert_eq!(transfer.progress.current_file_bytes, 4);
+        assert_eq!(transfer.progress.current_file_total_bytes, 10);
+    }
+
+    #[test]
+    fn conflict_prompt_toggle_then_overwrite_sets_default_choice() {
+        let mut app = app_with(vec![]);
+        app.mode = AppMode::Sftp;
+        app.recursive_conflict_prompt = Some(RecursiveConflictPrompt::new("a.txt".into()));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+
+        assert!(app.recursive_conflict_prompt.is_none());
+        assert_eq!(
+            app.conflict_resolution.default_file_conflict,
+            Some(FileConflictChoice::Overwrite)
+        );
+    }
+
+    #[test]
+    fn failure_prompt_retry_keeps_current_recursive_file_pending() {
+        let plan = RecursiveTransferPlan::upload(
+            PathBuf::from("/local/foo"),
+            "/remote".into(),
+            vec![],
+            vec![crate::sftp::transfer::PlannedFile {
+                relative_path: PathBuf::from("a.txt"),
+                size: 10,
+            }],
+        );
+
+        let mut app = app_with(vec![]);
+        app.mode = AppMode::Sftp;
+        app.active_recursive_transfer = Some(ActiveRecursiveTransfer::new(plan));
+        app.recursive_failure_prompt = Some(RecursiveFailureState::for_file("a.txt"));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('r')));
+
+        assert!(app.recursive_failure_prompt.is_none());
+        assert_eq!(
+            app.active_recursive_transfer
+                .as_ref()
+                .unwrap()
+                .next_file_index,
+            0
+        );
+    }
+
+    #[test]
+    fn recursive_download_conflict_opens_prompt_before_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("foo")).unwrap();
+        std::fs::write(temp.path().join("foo/a.txt"), b"old").unwrap();
+
+        let plan = RecursiveTransferPlan::download(
+            "/remote/foo".into(),
+            temp.path().to_path_buf(),
+            vec![],
+            vec![crate::sftp::transfer::PlannedFile {
+                relative_path: PathBuf::from("a.txt"),
+                size: 10,
+            }],
+        );
+
+        let mut app = app_with(vec![]);
+        let mut transfer = ActiveRecursiveTransfer::new(plan);
+        transfer.directories_prepared = true;
+        app.active_recursive_transfer = Some(transfer);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_next_recursive_file()).unwrap();
+
+        assert!(app.active_transfer.is_none());
+        assert_eq!(
+            app.recursive_conflict_prompt
+                .as_ref()
+                .map(|prompt| prompt.file_name.as_str()),
+            Some("a.txt")
+        );
+    }
+
+    #[test]
+    fn failed_recursive_transfer_opens_failure_prompt() {
+        let plan = RecursiveTransferPlan::upload(
+            PathBuf::from("/local/foo"),
+            "/remote".into(),
+            vec![],
+            vec![crate::sftp::transfer::PlannedFile {
+                relative_path: PathBuf::from("a.txt"),
+                size: 10,
+            }],
+        );
+
+        let mut app = app_with(vec![]);
+        app.active_recursive_transfer = Some(ActiveRecursiveTransfer::new(plan));
+        app.handle_recursive_transfer_result(TransferProgress {
+            filename: "a.txt".into(),
+            total_bytes: 10,
+            transferred_bytes: 3,
+            state: TransferState::Failed("boom".into()),
+            current_file_index: 1,
+            total_files: 1,
+        });
+
+        assert!(app.active_recursive_transfer.is_some());
+        assert_eq!(
+            app.recursive_failure_prompt
+                .as_ref()
+                .map(|prompt| prompt.file_name.as_str()),
+            Some("a.txt")
+        );
     }
 }
