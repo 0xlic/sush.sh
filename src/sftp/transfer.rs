@@ -27,6 +27,63 @@ pub struct TransferHandle {
     pub cancel: CancellationToken,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedDir {
+    pub relative_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedFile {
+    pub relative_path: PathBuf,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecursiveTransferPlan {
+    pub dir: crate::app::TransferDir,
+    pub source_root: PathBuf,
+    pub destination_root: String,
+    pub directories: Vec<PlannedDir>,
+    pub files: Vec<PlannedFile>,
+}
+
+impl RecursiveTransferPlan {
+    pub fn upload(
+        source_root: PathBuf,
+        destination_parent: String,
+        directories: Vec<PlannedDir>,
+        files: Vec<PlannedFile>,
+    ) -> Self {
+        let root_name = source_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let destination_root = join_remote_path(&destination_parent, &root_name);
+        Self {
+            dir: crate::app::TransferDir::Upload,
+            source_root,
+            destination_root,
+            directories,
+            files,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecursiveAggregateProgress {
+    pub current_file_index: usize,
+    pub total_files: usize,
+}
+
+impl RecursiveAggregateProgress {
+    pub fn new(total_files: usize) -> Self {
+        Self {
+            current_file_index: 0,
+            total_files,
+        }
+    }
+}
+
 const CHUNK: usize = 32 * 1024;
 
 pub fn download(sftp: SftpSession, remote: String, local: PathBuf, total: u64) -> TransferHandle {
@@ -182,4 +239,45 @@ async fn do_upload(
         })
         .await;
     Ok(())
+}
+
+fn join_remote_path(parent: &str, child: &str) -> String {
+    match parent {
+        "/" => format!("/{child}"),
+        _ if parent.ends_with('/') => format!("{parent}{child}"),
+        _ => format!("{parent}/{child}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_plan_keeps_selected_directory_name() {
+        let plan = RecursiveTransferPlan::upload(
+            PathBuf::from("/local/foo"),
+            "/remote".into(),
+            vec![
+                PlannedDir {
+                    relative_path: PathBuf::from("bar"),
+                },
+                PlannedDir {
+                    relative_path: PathBuf::from("baz"),
+                },
+            ],
+            vec![PlannedFile {
+                relative_path: PathBuf::from("a.txt"),
+                size: 10,
+            }],
+        );
+        assert_eq!(plan.destination_root, "/remote/foo");
+    }
+
+    #[test]
+    fn aggregate_progress_counts_only_files() {
+        let progress = RecursiveAggregateProgress::new(3);
+        assert_eq!(progress.total_files, 3);
+        assert_eq!(progress.current_file_index, 0);
+    }
 }

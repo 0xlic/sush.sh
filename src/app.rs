@@ -64,7 +64,7 @@ enum LoopEvent {
 }
 
 /// Transfer direction determines which pane is refreshed after completion.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferDir {
     Download, // remote -> local, refresh local when done
     Upload,   // local -> remote, refresh remote when done
