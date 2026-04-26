@@ -998,7 +998,7 @@ impl App {
             self.set_status("Remote edit only works from the remote pane".into());
             return;
         }
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.selected_index();
         let Some(entry) = pane.remote_entries.get(idx) else {
             return;
         };
@@ -1025,14 +1025,14 @@ impl App {
                 PaneSide::Local => PaneSide::Remote,
                 PaneSide::Remote => PaneSide::Local,
             };
-            pane.list_state.select(Some(0));
         }
     }
 
     fn pane_select_prev(&mut self) {
         if let Some(pane) = &mut self.sftp_pane {
-            let i = pane.list_state.selected().unwrap_or(0);
-            pane.list_state.select(Some(i.saturating_sub(1)));
+            let i = pane.selected_index();
+            pane.active_list_state_mut()
+                .select(Some(i.saturating_sub(1)));
         }
     }
 
@@ -1045,8 +1045,8 @@ impl App {
             if len == 0 {
                 return;
             }
-            let i = pane.list_state.selected().unwrap_or(0);
-            pane.list_state.select(Some((i + 1).min(len - 1)));
+            let i = pane.selected_index();
+            pane.active_list_state_mut().select(Some((i + 1).min(len - 1)));
         }
     }
 
@@ -1180,7 +1180,7 @@ impl App {
         if pane.side != PaneSide::Remote {
             return Ok(());
         }
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.selected_index();
         let Some(entry) = pane.remote_entries.get(idx).cloned() else {
             return Ok(());
         };
@@ -2035,7 +2035,7 @@ impl App {
         let Some(pane) = &mut self.sftp_pane else {
             return Ok(());
         };
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.selected_index();
 
         match pane.side {
             PaneSide::Remote => {
@@ -2060,7 +2060,7 @@ impl App {
                                 let pane = self.sftp_pane.as_mut().unwrap();
                                 pane.remote_path = new_path;
                                 pane.remote_entries = entries;
-                                pane.list_state.select(Some(0));
+                                pane.remote_list_state.select(Some(0));
                             }
                             Err(e) => eprintln!("[List directory failed: {e}]"),
                         }
@@ -2086,7 +2086,7 @@ impl App {
                             let pane = self.sftp_pane.as_mut().unwrap();
                             pane.local_path = new_path;
                             pane.local_entries = entries;
-                            pane.list_state.select(Some(0));
+                            pane.local_list_state.select(Some(0));
                         }
                         Err(e) => eprintln!("[List local directory failed: {e}]"),
                     }
@@ -2319,7 +2319,7 @@ impl App {
         if pane.side != PaneSide::Remote {
             return Ok(());
         }
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.remote_list_state.selected().unwrap_or(0);
         let Some(entry) = pane.remote_entries.get(idx).cloned() else {
             return Ok(());
         };
@@ -2371,7 +2371,7 @@ impl App {
         if pane.side != PaneSide::Local {
             return Ok(());
         }
-        let idx = pane.list_state.selected().unwrap_or(0);
+        let idx = pane.local_list_state.selected().unwrap_or(0);
         let Some(entry) = pane.local_entries.get(idx).cloned() else {
             return Ok(());
         };
@@ -3085,10 +3085,21 @@ mod tests {
             PaneSide::Local => pane.local_entries = entries,
             PaneSide::Remote => pane.remote_entries = entries,
         }
-        pane.list_state.select(Some(0));
+        match side {
+            PaneSide::Local => pane.local_list_state.select(Some(0)),
+            PaneSide::Remote => pane.remote_list_state.select(Some(0)),
+        }
         app.sftp_pane = Some(pane);
         app.mode = AppMode::Sftp;
         app
+    }
+
+    fn file_entry(name: &str, is_dir: bool) -> crate::sftp::client::FileEntry {
+        crate::sftp::client::FileEntry {
+            name: name.into(),
+            is_dir,
+            size: 0,
+        }
     }
 
     #[test]
@@ -3272,6 +3283,45 @@ mod tests {
     }
 
     #[test]
+    fn tab_switches_active_pane_without_resetting_local_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.remote_entries = vec![file_entry("r1.txt", false), file_entry("r2.txt", false)];
+        pane.local_list_state.select(Some(1));
+        pane.remote_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Tab));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.side, PaneSide::Local);
+        assert_eq!(pane.local_list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn switching_to_remote_preserves_remote_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.remote_entries = vec![file_entry("r1.txt", false), file_entry("r2.txt", false)];
+        pane.local_list_state.select(Some(0));
+        pane.remote_list_state.select(Some(1));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Tab));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.side, PaneSide::Remote);
+        assert_eq!(pane.remote_list_state.selected(), Some(1));
+    }
+
+    #[test]
     fn polling_detects_changed_fingerprint() {
         let mut state = RemoteEditWatchState::new("old".into());
         assert!(state.should_upload("new"));
@@ -3356,7 +3406,7 @@ mod tests {
             is_dir: true,
             size: 0,
         }];
-        pane.list_state.select(Some(0));
+        pane.local_list_state.select(Some(0));
         app.sftp_pane = Some(pane);
         app.mode = AppMode::Sftp;
 

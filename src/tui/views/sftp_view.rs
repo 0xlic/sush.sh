@@ -37,13 +37,17 @@ pub fn render(
         PaneSide::Local => pane.local_entries.as_slice(),
         PaneSide::Remote => pane.remote_entries.as_slice(),
     };
+    let list_state = match pane.side {
+        PaneSide::Local => &mut pane.local_list_state,
+        PaneSide::Remote => &mut pane.remote_list_state,
+    };
     f.render_stateful_widget(
         FileList {
             entries,
             title: label,
         },
         chunks[1],
-        &mut pane.list_state,
+        list_state,
     );
 
     if let Some((verb, prog)) = transfer {
