@@ -57,7 +57,8 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 - Your working directory context is preserved
 
 **SFTP that doesn't suck**
-- `Tab` to switch between local and remote panels
+- Wide terminals show local and remote panels side by side; narrow terminals show only the active pane
+- `Tab` to switch focus between local and remote panes without losing each side's selection
 - `d` to download, `u` to upload, with a live progress bar
 - Directory transfers keep the selected directory itself and show aggregate `N/M` progress
 - `e` to open a remote file in your system's default GUI app and auto-upload on save
@@ -137,7 +138,7 @@ When the folder sidebar is visible, search is scoped to the current folder and t
 **SFTP mode**
 | Key | Action |
 |-----|--------|
-| `Tab` | Toggle local / remote view |
+| `Tab` | Switch focus between local / remote panes |
 | `Enter` | Open directory |
 | `d` | Download selected file or directory |
 | `u` | Upload selected file or directory |
