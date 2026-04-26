@@ -1,9 +1,12 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{Stdout, stdout};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::ListState;
@@ -30,6 +33,7 @@ use crate::tui::views::folder_view::{
 use crate::tui::views::import_view::{self, ImportViewState};
 use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view, ssh_view};
 use crate::tui::widgets::confirm_dialog::ConfirmDialog;
+use crate::utils::open;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainFocus {
@@ -87,25 +91,56 @@ enum RemoteEditSyncState {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
 struct RemoteEditSession {
     remote_path: String,
     local_path: PathBuf,
+    workspace: tempfile::TempDir,
     last_uploaded_fingerprint: String,
     last_seen_fingerprint: String,
     sync_state: RemoteEditSyncState,
     last_error: Option<String>,
+    watch_state: RemoteEditWatchState,
+    watcher: Option<RecommendedWatcher>,
+    watch_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 }
 
 impl RemoteEditSession {
-    fn new(remote_path: String, local_path: PathBuf, initial_fingerprint: String) -> Self {
+    fn with_runtime(
+        remote_path: String,
+        local_path: PathBuf,
+        workspace: tempfile::TempDir,
+        initial_fingerprint: String,
+        watcher: Option<RecommendedWatcher>,
+        watch_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    ) -> Self {
         Self {
             remote_path,
             local_path,
+            workspace,
             last_uploaded_fingerprint: initial_fingerprint.clone(),
-            last_seen_fingerprint: initial_fingerprint,
+            last_seen_fingerprint: initial_fingerprint.clone(),
             sync_state: RemoteEditSyncState::Opening,
             last_error: None,
+            watch_state: RemoteEditWatchState::new(initial_fingerprint.clone()),
+            watcher,
+            watch_rx,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(remote_path: String, local_path: PathBuf, initial_fingerprint: String) -> Self {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            remote_path,
+            local_path,
+            workspace: tempfile::tempdir().unwrap(),
+            last_uploaded_fingerprint: initial_fingerprint.clone(),
+            last_seen_fingerprint: initial_fingerprint.clone(),
+            sync_state: RemoteEditSyncState::Opening,
+            last_error: None,
+            watch_state: RemoteEditWatchState::new(initial_fingerprint),
+            watcher: None,
+            watch_rx: rx,
         }
     }
 
@@ -131,6 +166,40 @@ impl RemoteEditSession {
         self.last_seen_fingerprint = fingerprint;
         self.sync_state = RemoteEditSyncState::Watching;
         self.last_error = None;
+    }
+
+    fn should_upload(&mut self, fingerprint: &str) -> bool {
+        self.last_seen_fingerprint = fingerprint.to_string();
+        self.watch_state.should_upload(fingerprint) && self.last_uploaded_fingerprint != fingerprint
+    }
+
+    fn display_name(&self) -> String {
+        Path::new(&self.remote_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.remote_path.clone())
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct RemoteEditWatchState {
+    last_observed_fingerprint: String,
+}
+
+impl RemoteEditWatchState {
+    fn new(initial_fingerprint: String) -> Self {
+        Self {
+            last_observed_fingerprint: initial_fingerprint,
+        }
+    }
+
+    fn should_upload(&mut self, fingerprint: &str) -> bool {
+        if self.last_observed_fingerprint == fingerprint {
+            return false;
+        }
+        self.last_observed_fingerprint = fingerprint.to_string();
+        true
     }
 }
 
@@ -337,6 +406,13 @@ impl App {
                 }
             }
 
+            if self.trigger_remote_edit {
+                self.trigger_remote_edit = false;
+                if let Err(e) = self.start_remote_edit().await {
+                    self.set_status(format!("Remote edit failed: {e}"));
+                }
+            }
+
             // Refresh the local directory after a transfer completes.
             if self.trigger_refresh_local {
                 self.trigger_refresh_local = false;
@@ -451,9 +527,10 @@ impl App {
                 self.leave_ssh_mode(terminal).await?;
             }
         }
+        self.poll_remote_edit().await?;
         // Clear status message after 4 seconds.
         if let Some((_, since)) = &self.status_msg
-            && since.elapsed() >= std::time::Duration::from_secs(4)
+            && since.elapsed() >= Duration::from_secs(4)
         {
             self.status_msg = None;
         }
@@ -720,7 +797,11 @@ impl App {
                 if let Some(last) = self.last_ctrl_c
                     && last.elapsed().as_millis() < 500
                 {
-                    self.exit_sftp();
+                    if self.remote_edit_session.is_some() {
+                        self.set_status("Finish remote editing before leaving SFTP".into());
+                    } else {
+                        self.exit_sftp();
+                    }
                     return;
                 }
                 self.last_ctrl_c = Some(now);
@@ -728,7 +809,13 @@ impl App {
                     tr.cancel.cancel();
                 }
             }
-            (KeyCode::Char('q'), KeyModifiers::NONE) => self.exit_sftp(),
+            (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                if self.remote_edit_session.is_some() {
+                    self.set_status("Finish remote editing before leaving SFTP".into());
+                } else {
+                    self.exit_sftp();
+                }
+            }
             _ if is_switch_key(k) => self.trigger_ssh_resume = true,
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
@@ -765,6 +852,7 @@ impl App {
         self.sftp_client = None;
         self.sftp_pane = None;
         self.active_transfer = None;
+        self.remote_edit_session = None;
         self.current_host_alias = None;
         self.mode = AppMode::Main;
     }
@@ -921,6 +1009,99 @@ impl App {
 
     fn set_status(&mut self, msg: String) {
         self.status_msg = Some((msg, Instant::now()));
+    }
+
+    async fn start_remote_edit(&mut self) -> Result<()> {
+        let Some(pane) = &self.sftp_pane else {
+            return Ok(());
+        };
+        if pane.side != PaneSide::Remote {
+            return Ok(());
+        }
+        let idx = pane.list_state.selected().unwrap_or(0);
+        let Some(entry) = pane.remote_entries.get(idx).cloned() else {
+            return Ok(());
+        };
+        if entry.is_dir {
+            return Ok(());
+        }
+        let remote_path = format!("{}/{}", pane.remote_path.trim_end_matches('/'), entry.name);
+        let workspace = tempfile::tempdir()?;
+        let local_path = workspace.path().join(&entry.name);
+
+        let Some(client) = &self.sftp_client else {
+            return Ok(());
+        };
+        client
+            .download_file_to_path(&remote_path, &local_path)
+            .await?;
+
+        let initial_fingerprint = fingerprint_file(&local_path)?;
+        let (watcher, watch_rx) = start_remote_edit_watcher(workspace.path())?;
+        open::open_path(&local_path)?;
+
+        let mut session = RemoteEditSession::with_runtime(
+            remote_path,
+            local_path,
+            workspace,
+            initial_fingerprint,
+            Some(watcher),
+            watch_rx,
+        );
+        session.mark_watching();
+        let file_name = session.display_name();
+        self.remote_edit_session = Some(session);
+        self.set_status(format!("Opened {file_name} for local editing"));
+        Ok(())
+    }
+
+    async fn poll_remote_edit(&mut self) -> Result<()> {
+        let Some(mut session) = self.remote_edit_session.take() else {
+            return Ok(());
+        };
+
+        while session.watch_rx.try_recv().is_ok() {}
+
+        let fingerprint = match fingerprint_file(&session.local_path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                session.mark_upload_failed(error.to_string());
+                self.set_status(format!("Remote edit file is unavailable: {error}"));
+                self.remote_edit_session = Some(session);
+                return Ok(());
+            }
+        };
+
+        if session.should_upload(&fingerprint) {
+            session.mark_uploading();
+            let file_name = session.display_name();
+            let upload_result = if let Some(client) = &self.sftp_client {
+                client
+                    .upload_file_from_path(&session.local_path, &session.remote_path)
+                    .await
+            } else {
+                bail!("SFTP session is not available")
+            };
+
+            match upload_result {
+                Ok(()) => {
+                    session.mark_uploaded(fingerprint);
+                    self.trigger_refresh_remote = true;
+                    self.set_status(format!("Uploaded {file_name}"));
+                }
+                Err(error) => {
+                    session.mark_upload_failed(error.to_string());
+                    self.set_status(format!("Auto upload failed: {error}"));
+                }
+            }
+        }
+
+        self.remote_edit_session = Some(session);
+        Ok(())
+    }
+
+    fn remote_edit_status(&self) -> Option<&str> {
+        self.status_msg.as_ref().map(|(msg, _)| msg.as_str())
     }
 
     fn reset_probe(&mut self) {
@@ -2074,11 +2255,12 @@ impl App {
                 }
             }
             AppMode::Sftp => {
+                let status_msg = self.remote_edit_status().map(str::to_owned);
                 if let Some(pane) = &mut self.sftp_pane {
                     let alias = self.current_host_alias.as_deref().unwrap_or("");
                     let transfer_info =
                         self.active_transfer.as_ref().map(|t| (t.verb, &t.progress));
-                    sftp_view::render(f, alias, pane, transfer_info);
+                    sftp_view::render(f, alias, pane, transfer_info, status_msg.as_deref());
                 }
                 if let Some(pwd) = &self.pwd_dialog {
                     pwd.dialog.render(f);
@@ -2126,6 +2308,33 @@ impl App {
         self.list_state = list_state;
         Ok(())
     }
+}
+
+fn start_remote_edit_watcher(
+    path: &Path,
+) -> Result<(RecommendedWatcher, tokio::sync::mpsc::UnboundedReceiver<()>)> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if result.is_ok() {
+            let _ = tx.send(());
+        }
+    })?;
+    watcher.watch(path, RecursiveMode::NonRecursive)?;
+    Ok((watcher, rx))
+}
+
+fn fingerprint_file(path: &Path) -> Result<String> {
+    let data = std::fs::read(path)?;
+    let metadata = std::fs::metadata(path)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .unwrap_or(Duration::ZERO)
+        .as_millis();
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    Ok(format!("{}:{modified}:{}", data.len(), hasher.finish()))
 }
 
 const SWITCH_SEQ: &[u8] = b"\x1c";
@@ -2469,7 +2678,7 @@ mod tests {
 
     #[test]
     fn remote_edit_session_starts_in_opening_state() {
-        let session = RemoteEditSession::new(
+        let session = RemoteEditSession::for_test(
             "/remote/app.conf".into(),
             PathBuf::from("/tmp/app.conf"),
             "hash-1".into(),
@@ -2481,7 +2690,7 @@ mod tests {
 
     #[test]
     fn failed_upload_keeps_session_active() {
-        let mut session = RemoteEditSession::new(
+        let mut session = RemoteEditSession::for_test(
             "/remote/app.conf".into(),
             PathBuf::from("/tmp/app.conf"),
             "hash-1".into(),
@@ -2531,5 +2740,57 @@ mod tests {
         );
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
         assert!(!app.trigger_remote_edit);
+    }
+
+    #[test]
+    fn pressing_q_with_active_remote_edit_does_not_exit_sftp() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Remote,
+            vec![crate::sftp::client::FileEntry {
+                name: "hosts".into(),
+                is_dir: false,
+                size: 12,
+            }],
+        );
+        app.remote_edit_session = Some(RemoteEditSession::for_test(
+            "/remote/hosts".into(),
+            PathBuf::from("/tmp/hosts"),
+            "hash-1".into(),
+        ));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('q')));
+        assert_eq!(app.mode, AppMode::Sftp);
+        assert!(app.sftp_pane.is_some());
+        assert!(app.status_msg.is_some());
+    }
+
+    #[test]
+    fn polling_detects_changed_fingerprint() {
+        let mut state = RemoteEditWatchState::new("old".into());
+        assert!(state.should_upload("new"));
+        assert!(!state.should_upload("new"));
+    }
+
+    #[test]
+    fn repeated_same_fingerprint_does_not_reupload() {
+        let mut session = RemoteEditSession::for_test(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        assert!(session.should_upload("hash-2"));
+        session.mark_uploaded("hash-2".into());
+        assert!(!session.should_upload("hash-2"));
+    }
+
+    #[test]
+    fn failed_upload_retries_after_next_change() {
+        let mut session = RemoteEditSession::for_test(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        assert!(session.should_upload("hash-2"));
+        session.mark_upload_failed("timeout".into());
+        assert!(session.should_upload("hash-3"));
     }
 }

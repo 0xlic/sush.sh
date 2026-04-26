@@ -48,7 +48,10 @@ uuid = { version = "1.23", features = ["v4"] }
 # System keyring
 keyring = { version = "3.6.0", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
-[dev-dependencies]
+# File watching
+notify = "8.2"
+
+# Temp files
 tempfile = "3.10"
 
 [profile.release]

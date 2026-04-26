@@ -13,6 +13,7 @@ pub fn render(
     host_alias: &str,
     pane: &mut SftpPaneState,
     transfer: Option<(&'static str, &TransferProgress)>,
+    status_msg: Option<&str>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -53,6 +54,8 @@ pub fn render(
             },
             chunks[2],
         );
+    } else if let Some(status) = status_msg {
+        f.render_widget(Paragraph::new(status), chunks[2]);
     } else {
         f.render_widget(
             StatusBar {

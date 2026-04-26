@@ -79,14 +79,15 @@ impl SftpClient {
     }
 
     pub async fn upload_file_from_path(&self, local_path: &Path, remote_path: &str) -> Result<()> {
+        let temp_remote_path = build_remote_edit_temp_path(remote_path);
         let mut local = tokio::fs::File::open(local_path)
             .await
             .with_context(|| format!("failed to open local file: {}", local_path.display()))?;
         let mut remote = self
             .session
-            .create(remote_path)
+            .create(&temp_remote_path)
             .await
-            .with_context(|| format!("failed to create remote file: {remote_path}"))?;
+            .with_context(|| format!("failed to create remote file: {temp_remote_path}"))?;
         let mut buffer = vec![0u8; 32 * 1024];
 
         loop {
@@ -96,6 +97,14 @@ impl SftpClient {
             }
             remote.write_all(&buffer[..count]).await?;
         }
+
+        drop(remote);
+        self.session
+            .rename(&temp_remote_path, remote_path)
+            .await
+            .with_context(|| {
+                format!("failed to replace remote file: {temp_remote_path} -> {remote_path}")
+            })?;
 
         Ok(())
     }
@@ -107,6 +116,19 @@ fn build_remote_child_path(parent: &str, name: &str) -> String {
         _ if parent.ends_with('/') => format!("{parent}{name}"),
         _ => format!("{parent}/{name}"),
     }
+}
+
+fn build_remote_edit_temp_path(remote_path: &str) -> String {
+    let path = Path::new(remote_path);
+    let parent = path
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".into());
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "remote-edit".into());
+    build_remote_child_path(&parent, &format!(".{filename}.sush-upload.tmp"))
 }
 
 pub fn list_local(path: &std::path::Path) -> Result<Vec<FileEntry>> {
@@ -141,6 +163,14 @@ mod tests {
     #[test]
     fn build_remote_child_path_avoids_double_slash_for_root() {
         assert_eq!(build_remote_child_path("/", "hosts"), "/hosts");
+    }
+
+    #[test]
+    fn build_remote_edit_temp_path_stays_in_same_directory() {
+        assert_eq!(
+            build_remote_edit_temp_path("/etc/hosts"),
+            "/etc/.hosts.sush-upload.tmp"
+        );
     }
 
     #[test]

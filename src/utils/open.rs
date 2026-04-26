@@ -1,3 +1,8 @@
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::{Context, Result};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCommand {
     pub program: String,
@@ -21,6 +26,32 @@ impl OpenCommand {
             },
         }
     }
+
+    pub fn for_current(path: &Path) -> Self {
+        Self::for_platform(current_platform(), &path.to_string_lossy())
+    }
+
+    pub fn spawn(&self) -> Result<()> {
+        Command::new(&self.program)
+            .args(&self.args)
+            .spawn()
+            .with_context(|| format!("failed to launch {}", self.program))?;
+        Ok(())
+    }
+}
+
+pub fn current_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+pub fn open_path(path: &Path) -> Result<()> {
+    OpenCommand::for_current(path).spawn()
 }
 
 #[cfg(test)]
@@ -45,9 +76,6 @@ mod tests {
     fn windows_uses_shell_open() {
         let launcher = OpenCommand::for_platform("windows", "C:\\temp\\demo.txt");
         assert_eq!(launcher.program, "cmd");
-        assert_eq!(
-            launcher.args,
-            vec!["/C", "start", "", "C:\\temp\\demo.txt"]
-        );
+        assert_eq!(launcher.args, vec!["/C", "start", "", "C:\\temp\\demo.txt"]);
     }
 }
