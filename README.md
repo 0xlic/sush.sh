@@ -193,7 +193,7 @@ For normal files, repeated uploads and downloads now resume from the existing ta
 | **v0.4** ✅ | Connection history · recency-boosted search · TCP connectivity probe |
 | **v0.5** ✅ | Path-type tags · main-view folder sidebar · folder jump · scoped `path:` search |
 | **v0.6** ✅ | System keyring credential storage · silent save after successful auth · temporary input only when Secret Service is unavailable |
-| v0.7 | Recursive folder transfer with aggregate progress · remote file editing with auto-upload on save · dual-pane SFTP · background transfer queue · resume support |
+| **v0.7** ✅ | Recursive folder transfer with aggregate progress · remote file editing with auto-upload on save · dual-pane SFTP · background transfer queue · resume support |
 | v0.8 | Port forwarding · ProxyJump chains · SOCKS5 proxy |
 | v1.0 | Homebrew/AUR/Scoop · man page · full platform testing |
 
