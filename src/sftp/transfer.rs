@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::sftp::client::SftpClient;
+use crate::sftp::client::{FileEntry, SftpClient};
 
 #[derive(Debug, Clone)]
 pub struct TransferProgress {
@@ -224,6 +224,91 @@ pub async fn build_remote_recursive_plan(
         directories,
         files,
     ))
+}
+
+pub fn build_local_batch_plan(
+    source_root: &Path,
+    destination_root: &str,
+    selected_entries: &[FileEntry],
+) -> Result<RecursiveTransferPlan> {
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+
+    for entry in selected_entries {
+        let relative_path = PathBuf::from(&entry.name);
+        if entry.is_dir {
+            directories.push(PlannedDir {
+                relative_path: relative_path.clone(),
+            });
+            collect_local_entries(
+                source_root,
+                &source_root.join(&entry.name),
+                &mut directories,
+                &mut files,
+            )?;
+        } else {
+            files.push(PlannedFile {
+                relative_path,
+                size: entry.size,
+            });
+        }
+    }
+
+    directories.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    Ok(RecursiveTransferPlan {
+        dir: crate::app::TransferDir::Upload,
+        source_root: source_root.to_path_buf(),
+        destination_root: destination_root.to_string(),
+        directories,
+        files,
+    })
+}
+
+pub async fn build_remote_batch_plan(
+    client: Option<&SftpClient>,
+    source_root: &str,
+    destination_root: &Path,
+    selected_entries: &[FileEntry],
+) -> Result<RecursiveTransferPlan> {
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+
+    for entry in selected_entries {
+        let relative_path = PathBuf::from(&entry.name);
+        if entry.is_dir {
+            directories.push(PlannedDir {
+                relative_path: relative_path.clone(),
+            });
+            let client = client.context("missing SFTP client for batch remote directory plan")?;
+            let remote_root = join_remote_path(source_root, &entry.name);
+            collect_remote_entries(
+                client,
+                source_root,
+                &remote_root,
+                &mut directories,
+                &mut files,
+            )
+            .await?;
+        } else {
+            files.push(PlannedFile {
+                relative_path,
+                size: entry.size,
+            });
+        }
+    }
+
+    directories.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    Ok(RecursiveTransferPlan {
+        dir: crate::app::TransferDir::Download,
+        source_root: PathBuf::from(source_root),
+        destination_root: destination_root.display().to_string(),
+        directories,
+        files,
+    })
 }
 
 pub fn download(sftp: SftpSession, remote: String, local: PathBuf, total: u64) -> TransferHandle {

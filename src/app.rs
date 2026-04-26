@@ -21,7 +21,8 @@ use crate::config::store;
 use crate::sftp::client::{SftpClient, list_local};
 use crate::sftp::transfer::{
     RecursiveAggregateProgress, RecursiveTransferPlan, TransferProgress, TransferState,
-    build_local_recursive_plan, build_remote_recursive_plan, download, upload,
+    build_local_batch_plan, build_local_recursive_plan, build_remote_batch_plan,
+    build_remote_recursive_plan, download, upload,
 };
 use crate::sftp::{PaneSide, SftpPaneState};
 use crate::ssh::auth;
@@ -2324,6 +2325,42 @@ impl App {
     }
 
     async fn start_download(&mut self) -> Result<()> {
+        let batch_plan = {
+            let Some(pane) = &self.sftp_pane else {
+                return Ok(());
+            };
+            if pane.side != PaneSide::Remote || pane.remote_selection.is_empty() {
+                None
+            } else {
+                let selected_entries = pane
+                    .remote_selection
+                    .iter()
+                    .filter_map(|index| pane.remote_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+                Some((
+                    selected_entries.len(),
+                    build_remote_batch_plan(
+                        self.sftp_client.as_ref(),
+                        &pane.remote_path,
+                        &pane.local_path,
+                        &selected_entries,
+                    )
+                    .await?,
+                ))
+            }
+        };
+        if let Some((selected_count, plan)) = batch_plan {
+            self.conflict_resolution = ConflictResolutionState::default();
+            self.recursive_conflict_prompt = None;
+            self.recursive_failure_prompt = None;
+            self.active_recursive_transfer = Some(ActiveRecursiveTransfer::new(plan));
+            if let Some(pane) = &mut self.sftp_pane {
+                pane.clear_active_selection();
+            }
+            self.set_status(format!("Queued batch download for {selected_count} items"));
+            return Ok(());
+        }
+
         let Some(pane) = &self.sftp_pane else {
             return Ok(());
         };
@@ -2376,6 +2413,36 @@ impl App {
     }
 
     async fn start_upload(&mut self) -> Result<()> {
+        let batch_plan = {
+            let Some(pane) = &self.sftp_pane else {
+                return Ok(());
+            };
+            if pane.side != PaneSide::Local || pane.local_selection.is_empty() {
+                None
+            } else {
+                let selected_entries = pane
+                    .local_selection
+                    .iter()
+                    .filter_map(|index| pane.local_entries.get(*index).cloned())
+                    .collect::<Vec<_>>();
+                Some((
+                    selected_entries.len(),
+                    build_local_batch_plan(&pane.local_path, &pane.remote_path, &selected_entries)?,
+                ))
+            }
+        };
+        if let Some((selected_count, plan)) = batch_plan {
+            self.conflict_resolution = ConflictResolutionState::default();
+            self.recursive_conflict_prompt = None;
+            self.recursive_failure_prompt = None;
+            self.active_recursive_transfer = Some(ActiveRecursiveTransfer::new(plan));
+            if let Some(pane) = &mut self.sftp_pane {
+                pane.clear_active_selection();
+            }
+            self.set_status(format!("Queued batch upload for {selected_count} items"));
+            return Ok(());
+        }
+
         let Some(pane) = &self.sftp_pane else {
             return Ok(());
         };
@@ -3436,6 +3503,78 @@ mod tests {
         assert!(pane.local_selection.contains(&0));
         assert!(pane.local_selection.contains(&1));
         assert!(pane.local_selection.contains(&2));
+    }
+
+    #[test]
+    fn batch_upload_uses_selected_local_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(temp.path().join("b.txt"), b"b").unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_path = temp.path().to_path_buf();
+        pane.local_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.local_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_upload()).unwrap();
+
+        let transfer = app.active_recursive_transfer.as_ref().unwrap();
+        assert_eq!(transfer.plan.dir, TransferDir::Upload);
+        assert_eq!(transfer.plan.source_root, temp.path());
+        assert_eq!(transfer.plan.destination_root, "/remote");
+        assert_eq!(transfer.plan.files.len(), 2);
+        assert_eq!(
+            transfer
+                .plan
+                .files
+                .iter()
+                .map(|file| file.relative_path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")]
+        );
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.is_empty());
+        assert_eq!(pane.local_selection_anchor, None);
+    }
+
+    #[test]
+    fn batch_download_uses_selected_remote_entries() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.local_path = temp.path().to_path_buf();
+        pane.remote_entries = vec![file_entry("a.txt", false), file_entry("b.txt", false)];
+        pane.remote_selection.extend([0, 1]);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(app.start_download()).unwrap();
+
+        let transfer = app.active_recursive_transfer.as_ref().unwrap();
+        assert_eq!(transfer.plan.dir, TransferDir::Download);
+        assert_eq!(transfer.plan.source_root, PathBuf::from("/remote"));
+        assert_eq!(transfer.plan.destination_root, temp.path().display().to_string());
+        assert_eq!(transfer.plan.files.len(), 2);
+        assert_eq!(
+            transfer
+                .plan
+                .files
+                .iter()
+                .map(|file| file.relative_path.clone())
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")]
+        );
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.remote_selection.is_empty());
+        assert_eq!(pane.remote_selection_anchor, None);
     }
 
     #[test]
