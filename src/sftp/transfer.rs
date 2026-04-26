@@ -73,6 +73,9 @@ impl RecursiveTransferPlan {
 pub struct RecursiveAggregateProgress {
     pub current_file_index: usize,
     pub total_files: usize,
+    pub current_file_name: Option<String>,
+    pub current_file_total_bytes: u64,
+    pub current_file_bytes: u64,
 }
 
 impl RecursiveAggregateProgress {
@@ -80,7 +83,29 @@ impl RecursiveAggregateProgress {
         Self {
             current_file_index: 0,
             total_files,
+            current_file_name: None,
+            current_file_total_bytes: 0,
+            current_file_bytes: 0,
         }
+    }
+
+    pub fn start_file(&mut self, name: String, total_bytes: u64) {
+        self.current_file_name = Some(name);
+        self.current_file_total_bytes = total_bytes;
+        self.current_file_bytes = 0;
+    }
+
+    pub fn update_bytes(&mut self, transferred_bytes: u64) {
+        self.current_file_bytes = transferred_bytes;
+    }
+
+    pub fn finish_file(&mut self) {
+        if self.current_file_index < self.total_files {
+            self.current_file_index += 1;
+        }
+        self.current_file_name = None;
+        self.current_file_total_bytes = 0;
+        self.current_file_bytes = 0;
     }
 }
 
@@ -364,5 +389,23 @@ mod tests {
             relative_path: PathBuf::from("real/a.txt"),
             size: 1,
         }]);
+    }
+
+    #[test]
+    fn aggregate_progress_moves_to_next_file() {
+        let mut progress = RecursiveAggregateProgress::new(2);
+        progress.start_file("a.txt".into(), 10);
+        progress.finish_file();
+        assert_eq!(progress.current_file_index, 1);
+    }
+
+    #[test]
+    fn aggregate_progress_keeps_current_file_bytes() {
+        let mut progress = RecursiveAggregateProgress::new(1);
+        progress.start_file("a.txt".into(), 10);
+        progress.update_bytes(4);
+        assert_eq!(progress.current_file_bytes, 4);
+        assert_eq!(progress.current_file_name.as_deref(), Some("a.txt"));
+        assert_eq!(progress.current_file_total_bytes, 10);
     }
 }
