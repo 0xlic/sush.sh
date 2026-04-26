@@ -272,6 +272,7 @@ pub fn render(f: &mut Frame, draft: &EditDraft, all_tags: &[String]) {
                 ("ESC", "Cancel"),
                 ("Tab/↑↓", "Next field"),
             ],
+            transfer_badge: None,
         },
         status_area,
     );

@@ -3,11 +3,9 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Paragraph;
 
-use crate::sftp::transfer::TransferProgress;
 use crate::sftp::{PaneSide, SftpPaneState};
 use crate::tui::widgets::file_list::FileList;
-use crate::tui::widgets::progress_bar::ProgressView;
-use crate::tui::widgets::status_bar::StatusBar;
+use crate::tui::widgets::status_bar::{StatusBar, TransferBadge, build_status_message_line};
 
 const DUAL_PANE_MIN_WIDTH: u16 = 100;
 const DEFAULT_HINTS: [(&str, &str); 8] = [
@@ -54,8 +52,8 @@ pub fn render(
     f: &mut Frame,
     host_alias: &str,
     pane: &mut SftpPaneState,
-    transfer: Option<(&'static str, &TransferProgress)>,
     status_msg: Option<&str>,
+    transfer_badge: Option<&TransferBadge>,
 ) {
     let layout_mode = layout_mode_for_width(f.area().width);
     let chunks = Layout::default()
@@ -140,16 +138,15 @@ pub fn render(
         }
     }
 
-    if let Some((verb, prog)) = transfer {
+    if let Some(status) = status_msg {
         f.render_widget(
-            ProgressView {
-                progress: prog,
-                verb,
-            },
+            Paragraph::new(build_status_message_line(
+                status,
+                transfer_badge,
+                chunks[2].width,
+            )),
             chunks[2],
         );
-    } else if let Some(status) = status_msg {
-        f.render_widget(Paragraph::new(status), chunks[2]);
     } else {
         let active_multi_select = match pane.side {
             PaneSide::Local => !pane.local_selection.is_empty(),
@@ -161,7 +158,13 @@ pub fn render(
         } else {
             &DEFAULT_HINTS
         };
-        f.render_widget(StatusBar { hints }, chunks[2]);
+        f.render_widget(
+            StatusBar {
+                hints,
+                transfer_badge,
+            },
+            chunks[2],
+        );
     }
 }
 

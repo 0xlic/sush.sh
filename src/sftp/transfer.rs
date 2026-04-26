@@ -226,6 +226,7 @@ pub async fn build_remote_recursive_plan(
     ))
 }
 
+#[allow(dead_code)]
 pub fn build_local_batch_plan(
     source_root: &Path,
     destination_root: &str,
@@ -266,6 +267,7 @@ pub fn build_local_batch_plan(
     })
 }
 
+#[allow(dead_code)]
 pub async fn build_remote_batch_plan(
     client: Option<&SftpClient>,
     source_root: &str,

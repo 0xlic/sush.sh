@@ -358,6 +358,7 @@ pub fn render(
                 ("Enter", "Enter dir"),
                 ("ESC", "Exit"),
             ],
+            transfer_badge: None,
         },
         status_area,
     );

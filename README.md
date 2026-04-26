@@ -59,10 +59,11 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 **SFTP that doesn't suck**
 - Wide terminals show local and remote panels side by side; narrow terminals show only the active pane
 - `Tab` to switch focus between local and remote panes without losing each side's selection
-- `d` to download, `u` to upload, with a live progress bar
+- `d` to download, `u` to upload, with a global bottom-right transfer badge
 - Directory transfers keep the selected directory itself and show aggregate `N/M` progress
 - `e` to open a remote file in your system's default GUI app and auto-upload on save
 - `Enter` to navigate directories
+- One connection-scoped FIFO queue keeps transfers running while you move between Main, SSH, and SFTP
 
 **Snappy**
 - Starts in under 200ms
@@ -139,16 +140,24 @@ When the folder sidebar is visible, search is scoped to the current folder and t
 | Key | Action |
 |-----|--------|
 | `Tab` | Switch focus between local / remote panes |
+| `Space` | Toggle selection on the focused row |
+| `Space` × 2 | Select the inclusive range from the anchor to the focused row |
+| `Esc` | Cancel multi-select for the active pane |
 | `Enter` | Open directory |
-| `d` | Download selected file or directory |
-| `u` | Upload selected file or directory |
+| `d` | Download the selected remote item, or all selected remote items in multi-select mode |
+| `u` | Upload the selected local item, or all selected local items in multi-select mode |
+| `D` | Delete all selected items in the active pane |
 | `e` | Edit selected remote file locally |
 | `Ctrl-\` | Switch back to SSH shell |
 | `Ctrl-C` × 2 | Return to host list |
 
 When you press `e` on a remote file, `sush` downloads it into a temporary workspace, opens it with the operating system's default app, watches for changes, and auto-uploads after each save. Auto-upload writes to a temporary remote file first, moves the old target aside when needed, and then switches the new file into place.
 
-When you transfer a directory, `sush` preserves the selected directory itself at the destination, prepares nested directories first, and then transfers files one by one while the progress bar shows `current/total` plus the current file byte progress.
+When you transfer a directory, `sush` preserves the selected directory itself at the destination, prepares nested directories first, and then transfers files one by one while the queue badge shows `current/total` plus the current file percentage for the active file.
+
+In SFTP multi-select mode, each pane keeps its own selection set. Press `Space` once to toggle the focused row and set the anchor. Press `Space` twice quickly on another row to select the inclusive range between the anchor and the current row. While multi-select is active, the status bar switches to batch-only actions: local pane shows `u / D / Esc`, remote pane shows `d / D / Esc`.
+
+Transfers now run through a single FIFO queue scoped to the current SSH connection. The bottom-right corner of Main, SSH, and SFTP shows a compact badge like `↑ 2/10 37%` or `↓ 2/10 37%`, so long-running transfers continue in the background without taking over the entire status line. Disconnecting the current connection clears the queue.
 
 ---
 
@@ -182,7 +191,7 @@ When you transfer a directory, `sush` preserves the selected directory itself at
 | **v0.4** ✅ | Connection history · recency-boosted search · TCP connectivity probe |
 | **v0.5** ✅ | Path-type tags · main-view folder sidebar · folder jump · scoped `path:` search |
 | **v0.6** ✅ | System keyring credential storage · silent save after successful auth · temporary input only when Secret Service is unavailable |
-| v0.7 | Recursive folder transfer with aggregate progress · remote file editing with auto-upload on save · dual-pane SFTP |
+| v0.7 | Recursive folder transfer with aggregate progress · remote file editing with auto-upload on save · dual-pane SFTP · background transfer queue |
 | v0.8 | Port forwarding · ProxyJump chains · SOCKS5 proxy |
 | v1.0 | Homebrew/AUR/Scoop · man page · full platform testing |
 

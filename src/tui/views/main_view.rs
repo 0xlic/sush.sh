@@ -119,7 +119,13 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
             ("q", "Quit"),
         ]
     };
-    f.render_widget(StatusBar { hints }, chunks[2]);
+    f.render_widget(
+        StatusBar {
+            hints,
+            transfer_badge: app.global_transfer_badge().as_ref(),
+        },
+        chunks[2],
+    );
 
     if app.show_folder_sidebar
         && app.main_focus == MainFocus::Directory
