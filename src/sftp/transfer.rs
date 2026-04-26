@@ -5,12 +5,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::sftp::client::SftpClient;
+
 #[derive(Debug, Clone)]
 pub struct TransferProgress {
     pub filename: String,
     pub total_bytes: u64,
     pub transferred_bytes: u64,
     pub state: TransferState,
+    pub current_file_index: usize,
+    pub total_files: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +31,7 @@ pub struct TransferHandle {
     pub cancel: CancellationToken,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecursiveTransferEvent {
     CreateDir { relative_path: PathBuf },
@@ -35,12 +40,14 @@ pub enum RecursiveTransferEvent {
     Finished,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RecursiveTransferDriver {
     plan: RecursiveTransferPlan,
     conflicting_files: Vec<PathBuf>,
 }
 
+#[allow(dead_code)]
 impl RecursiveTransferDriver {
     pub fn new(plan: RecursiveTransferPlan, conflicting_files: Vec<PathBuf>) -> Self {
         Self {
@@ -113,6 +120,26 @@ impl RecursiveTransferPlan {
             files,
         }
     }
+
+    pub fn download(
+        source_root: String,
+        destination_parent: PathBuf,
+        directories: Vec<PlannedDir>,
+        files: Vec<PlannedFile>,
+    ) -> Self {
+        let root_name = Path::new(&source_root)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let destination_root = destination_parent.join(&root_name);
+        Self {
+            dir: crate::app::TransferDir::Download,
+            source_root: PathBuf::from(source_root),
+            destination_root: destination_root.display().to_string(),
+            directories,
+            files,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +201,31 @@ pub fn build_local_recursive_plan(
     ))
 }
 
+pub async fn build_remote_recursive_plan(
+    client: &SftpClient,
+    source_root: &str,
+    destination_parent: &Path,
+) -> Result<RecursiveTransferPlan> {
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    collect_remote_entries(
+        client,
+        source_root,
+        source_root,
+        &mut directories,
+        &mut files,
+    )
+    .await?;
+    directories.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(RecursiveTransferPlan::download(
+        source_root.to_string(),
+        destination_parent.to_path_buf(),
+        directories,
+        files,
+    ))
+}
+
 pub fn download(sftp: SftpSession, remote: String, local: PathBuf, total: u64) -> TransferHandle {
     let (tx, rx) = mpsc::channel(32);
     let cancel = CancellationToken::new();
@@ -187,6 +239,8 @@ pub fn download(sftp: SftpSession, remote: String, local: PathBuf, total: u64) -
                     total_bytes: total,
                     transferred_bytes: 0,
                     state: TransferState::Failed(e.to_string()),
+                    current_file_index: 1,
+                    total_files: 1,
                 })
                 .await;
         }
@@ -221,6 +275,8 @@ async fn do_download(
                     total_bytes: total,
                     transferred_bytes: acc,
                     state: TransferState::Cancelled,
+                    current_file_index: 1,
+                    total_files: 1,
                 })
                 .await;
             return Ok(());
@@ -237,6 +293,8 @@ async fn do_download(
                 total_bytes: total,
                 transferred_bytes: acc,
                 state: TransferState::InProgress,
+                current_file_index: 1,
+                total_files: 1,
             })
             .await;
     }
@@ -246,6 +304,8 @@ async fn do_download(
             total_bytes: total,
             transferred_bytes: acc,
             state: TransferState::Completed,
+            current_file_index: 1,
+            total_files: 1,
         })
         .await;
     Ok(())
@@ -265,6 +325,8 @@ pub fn upload(sftp: SftpSession, local: PathBuf, remote: String) -> Result<Trans
                     total_bytes: total,
                     transferred_bytes: 0,
                     state: TransferState::Failed(e.to_string()),
+                    current_file_index: 1,
+                    total_files: 1,
                 })
                 .await;
         }
@@ -299,6 +361,8 @@ async fn do_upload(
                     total_bytes: total,
                     transferred_bytes: acc,
                     state: TransferState::Cancelled,
+                    current_file_index: 1,
+                    total_files: 1,
                 })
                 .await;
             return Ok(());
@@ -315,6 +379,8 @@ async fn do_upload(
                 total_bytes: total,
                 transferred_bytes: acc,
                 state: TransferState::InProgress,
+                current_file_index: 1,
+                total_files: 1,
             })
             .await;
     }
@@ -324,6 +390,8 @@ async fn do_upload(
             total_bytes: total,
             transferred_bytes: acc,
             state: TransferState::Completed,
+            current_file_index: 1,
+            total_files: 1,
         })
         .await;
     Ok(())
@@ -366,6 +434,52 @@ fn collect_local_entries(
     Ok(())
 }
 
+async fn collect_remote_entries(
+    client: &SftpClient,
+    root: &str,
+    current: &str,
+    directories: &mut Vec<PlannedDir>,
+    files: &mut Vec<PlannedFile>,
+) -> Result<()> {
+    let mut pending_dirs = Vec::new();
+    for entry in client.list_dir(current).await? {
+        if matches!(entry.name.as_str(), "." | "..") {
+            continue;
+        }
+
+        let child_path = join_remote_path(current, &entry.name);
+        let relative_path = Path::new(&child_path)
+            .strip_prefix(root)
+            .context("failed to derive remote relative path for recursive transfer")?
+            .to_path_buf();
+
+        if entry.is_dir {
+            directories.push(PlannedDir {
+                relative_path: relative_path.clone(),
+            });
+            pending_dirs.push(child_path);
+        } else {
+            files.push(PlannedFile {
+                relative_path,
+                size: entry.size,
+            });
+        }
+    }
+
+    for directory in pending_dirs {
+        Box::pin(collect_remote_entries(
+            client,
+            root,
+            &directory,
+            directories,
+            files,
+        ))
+        .await?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +514,23 @@ mod tests {
     }
 
     #[test]
+    fn download_plan_keeps_selected_directory_name() {
+        let plan = RecursiveTransferPlan::download(
+            "/remote/foo".into(),
+            PathBuf::from("/tmp/local"),
+            vec![PlannedDir {
+                relative_path: PathBuf::from("bar"),
+            }],
+            vec![PlannedFile {
+                relative_path: PathBuf::from("a.txt"),
+                size: 10,
+            }],
+        );
+        assert_eq!(plan.destination_root, "/tmp/local/foo");
+        assert_eq!(plan.dir, crate::app::TransferDir::Download);
+    }
+
+    #[test]
     fn local_scan_collects_nested_files() {
         let temp = tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("foo/bar")).unwrap();
@@ -430,11 +561,19 @@ mod tests {
 
         let plan = build_local_recursive_plan(&temp.path().join("foo"), "/remote").unwrap();
 
-        assert_eq!(plan.directories, vec![PlannedDir { relative_path: PathBuf::from("real") }]);
-        assert_eq!(plan.files, vec![PlannedFile {
-            relative_path: PathBuf::from("real/a.txt"),
-            size: 1,
-        }]);
+        assert_eq!(
+            plan.directories,
+            vec![PlannedDir {
+                relative_path: PathBuf::from("real")
+            }]
+        );
+        assert_eq!(
+            plan.files,
+            vec![PlannedFile {
+                relative_path: PathBuf::from("real/a.txt"),
+                size: 1,
+            }]
+        );
     }
 
     #[test]
@@ -469,10 +608,7 @@ mod tests {
             }],
         );
         let steps = RecursiveTransferDriver::new(plan, vec![]).collect_events();
-        assert!(matches!(
-            steps[0],
-            RecursiveTransferEvent::CreateDir { .. }
-        ));
+        assert!(matches!(steps[0], RecursiveTransferEvent::CreateDir { .. }));
         assert!(matches!(
             steps[1],
             RecursiveTransferEvent::TransferFile { .. }
@@ -490,7 +626,8 @@ mod tests {
                 size: 10,
             }],
         );
-        let steps = RecursiveTransferDriver::new(plan, vec![PathBuf::from("bar/a.txt")]).collect_events();
+        let steps =
+            RecursiveTransferDriver::new(plan, vec![PathBuf::from("bar/a.txt")]).collect_events();
         assert!(matches!(
             steps[0],
             RecursiveTransferEvent::FileConflict { .. }

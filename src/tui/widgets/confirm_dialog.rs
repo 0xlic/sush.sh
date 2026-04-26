@@ -10,12 +10,29 @@ pub struct ConfirmDialog<'a> {
     pub message: &'a str,
 }
 
+pub struct ChoiceDialog<'a> {
+    pub title: &'a str,
+    pub message: &'a str,
+    pub hints: Vec<(&'a str, &'a str)>,
+}
+
 #[allow(dead_code)]
 impl<'a> ConfirmDialog<'a> {
     pub fn new(title: &'a str, message: &'a str) -> Self {
         Self { title, message }
     }
 
+    pub fn render(&self, f: &mut Frame) {
+        ChoiceDialog {
+            title: self.title,
+            message: self.message,
+            hints: vec![("y", "Yes"), ("n/ESC", "No")],
+        }
+        .render(f);
+    }
+}
+
+impl<'a> ChoiceDialog<'a> {
     pub fn render(&self, f: &mut Frame) {
         // Fixed height: 5 rows (2 borders + message + gap + hints), width 50%
         let area = centered_fixed(50, 5, f.area());
@@ -32,15 +49,22 @@ impl<'a> ConfirmDialog<'a> {
         .areas(block.inner(area));
         f.render_widget(block, area);
         f.render_widget(Paragraph::new(self.message), msg_area);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("y", Style::default().fg(Color::Yellow)),
-                Span::raw(":Yes   "),
-                Span::styled("n/ESC", Style::default().fg(Color::Yellow)),
-                Span::raw(":No"),
-            ])),
-            hints_area,
+        let hints = Line::from(
+            self.hints
+                .iter()
+                .enumerate()
+                .flat_map(|(idx, (key, label))| {
+                    let mut spans = Vec::new();
+                    if idx > 0 {
+                        spans.push(Span::raw("   "));
+                    }
+                    spans.push(Span::styled(*key, Style::default().fg(Color::Yellow)));
+                    spans.push(Span::raw(format!(":{label}")));
+                    spans
+                })
+                .collect::<Vec<_>>(),
         );
+        f.render_widget(Paragraph::new(hints), hints_area);
     }
 }
 

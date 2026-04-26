@@ -17,13 +17,7 @@ impl<'a> Widget for ProgressView<'a> {
         } else {
             self.progress.transferred_bytes as f64 / self.progress.total_bytes as f64
         };
-        let label = format!(
-            "{} {}  {}/{}",
-            self.verb,
-            self.progress.filename,
-            human(self.progress.transferred_bytes),
-            human(self.progress.total_bytes),
-        );
+        let label = build_progress_label(self.verb, self.progress);
         Gauge::default()
             .gauge_style(Style::default().fg(Color::Black).bg(Color::Green))
             .style(Style::default().fg(Color::White))
@@ -42,4 +36,54 @@ fn human(n: u64) -> String {
         i += 1;
     }
     format!("{:.1} {}", v, U[i])
+}
+
+fn build_progress_label(verb: &str, progress: &TransferProgress) -> String {
+    let file_position = if progress.current_file_index == 0 {
+        1
+    } else {
+        progress.current_file_index
+    };
+    if progress.total_files > 1 {
+        format!(
+            "{} {}/{} {}  {}/{}",
+            verb,
+            file_position,
+            progress.total_files,
+            progress.filename,
+            human(progress.transferred_bytes),
+            human(progress.total_bytes),
+        )
+    } else {
+        format!(
+            "{} {}  {}/{}",
+            verb,
+            progress.filename,
+            human(progress.transferred_bytes),
+            human(progress.total_bytes),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sftp::transfer::TransferState;
+
+    #[test]
+    fn recursive_progress_label_includes_file_counts() {
+        let progress = TransferProgress {
+            filename: "a.txt".into(),
+            total_bytes: 10,
+            transferred_bytes: 4,
+            state: TransferState::InProgress,
+            current_file_index: 2,
+            total_files: 5,
+        };
+
+        assert_eq!(
+            build_progress_label("Uploading", &progress),
+            "Uploading 2/5 a.txt  4.0 B/10.0 B"
+        );
+    }
 }

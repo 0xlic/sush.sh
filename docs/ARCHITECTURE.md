@@ -273,6 +273,8 @@ struct TransferProgress {
     total_bytes: u64,
     transferred_bytes: u64,
     state: TransferState,
+    current_file_index: usize,
+    total_files: usize,
 }
 
 enum TransferState {
@@ -283,7 +285,23 @@ enum TransferState {
 }
 ```
 
-传输使用固定大小的缓冲区（32KB）逐块读写，每块完成后通过 channel 发送进度更新到 App 层；底部进度条显示方向、文件名和已传输/总大小。
+传输使用固定大小的缓冲区（32KB）逐块读写，每块完成后通过 channel 发送进度更新到 App 层；单文件传输使用 `1/1` 进度，递归传输在 App 层复用同一条链路并覆写为 `N/M` 聚合进度。
+
+## 递归目录传输（v0.7）
+
+v0.7 在现有 SFTP 单面板上增加目录递归上传/下载能力，仍然复用当前前台单任务模型：
+
+- `sftp/transfer.rs` 负责构建本地或远端目录计划
+- `App` 持有 `ActiveRecursiveTransfer` 作为递归任务运行态
+- 目录准备完成后，`App` 逐文件复用现有单文件 `upload()` / `download()` 逻辑
+- UI 继续复用现有进度条，只扩展标签内容为 `N/M + 当前文件字节进度`
+
+当前实现语义：
+
+- 保留所选目录本身
+- 先创建目录，再顺序传输文件
+- 同一时刻只运行一个前台传输任务
+- 单文件传输与递归传输共用同一套 `ActiveTransfer` 进度轮询链路
 
 ## 远程文件编辑（v0.7）
 
