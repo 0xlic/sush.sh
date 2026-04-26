@@ -977,7 +977,17 @@ impl App {
                     self.exit_sftp();
                 }
             }
+            (KeyCode::Esc, KeyModifiers::NONE) => {
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.clear_active_selection();
+                }
+            }
             _ if is_switch_key(k) => self.trigger_ssh_resume = true,
+            (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.toggle_active_selection();
+                }
+            }
             (KeyCode::Char('d'), KeyModifiers::NONE) => self.trigger_download = true,
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
             (KeyCode::Char('e'), KeyModifiers::NONE) => self.trigger_remote_edit(),
@@ -3339,6 +3349,41 @@ mod tests {
         let pane = app.sftp_pane.as_ref().unwrap();
         assert_eq!(pane.remote_list_state.selected(), Some(1));
         assert_eq!(pane.local_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn space_toggles_active_local_entry_selection() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Local;
+        pane.local_entries = vec![file_entry("a.txt", false)];
+        pane.local_list_state.select(Some(0));
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.local_selection.contains(&0));
+        assert_eq!(pane.local_selection_anchor, Some(0));
+    }
+
+    #[test]
+    fn esc_clears_active_remote_multi_select() {
+        let mut app = app_with(vec![]);
+        let mut pane = SftpPaneState::new("/remote".into());
+        pane.side = PaneSide::Remote;
+        pane.remote_entries = vec![file_entry("r1.txt", false)];
+        pane.remote_selection.insert(0);
+        pane.remote_selection_anchor = Some(0);
+        app.sftp_pane = Some(pane);
+        app.mode = AppMode::Sftp;
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert!(pane.remote_selection.is_empty());
+        assert_eq!(pane.remote_selection_anchor, None);
     }
 
     #[test]
