@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileType;
+use std::path::Path;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::ssh::session::ActiveSession;
 
@@ -53,6 +55,58 @@ impl SftpClient {
             .await
             .unwrap_or_else(|_| "/".into())
     }
+
+    pub async fn download_file_to_path(&self, remote_path: &str, local_path: &Path) -> Result<()> {
+        let mut remote = self
+            .session
+            .open(remote_path)
+            .await
+            .with_context(|| format!("failed to open remote file: {remote_path}"))?;
+        let mut local = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("failed to create local file: {}", local_path.display()))?;
+        let mut buffer = vec![0u8; 32 * 1024];
+
+        loop {
+            let count = remote.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            local.write_all(&buffer[..count]).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn upload_file_from_path(&self, local_path: &Path, remote_path: &str) -> Result<()> {
+        let mut local = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("failed to open local file: {}", local_path.display()))?;
+        let mut remote = self
+            .session
+            .create(remote_path)
+            .await
+            .with_context(|| format!("failed to create remote file: {remote_path}"))?;
+        let mut buffer = vec![0u8; 32 * 1024];
+
+        loop {
+            let count = local.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            remote.write_all(&buffer[..count]).await?;
+        }
+
+        Ok(())
+    }
+}
+
+fn build_remote_child_path(parent: &str, name: &str) -> String {
+    match parent {
+        "/" => format!("/{name}"),
+        _ if parent.ends_with('/') => format!("{parent}{name}"),
+        _ => format!("{parent}/{name}"),
+    }
 }
 
 pub fn list_local(path: &std::path::Path) -> Result<Vec<FileEntry>> {
@@ -73,4 +127,25 @@ pub fn list_local(path: &std::path::Path) -> Result<Vec<FileEntry>> {
         _ => a.name.cmp(&b.name),
     });
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_remote_child_path_joins_under_directory() {
+        assert_eq!(build_remote_child_path("/etc", "hosts"), "/etc/hosts");
+    }
+
+    #[test]
+    fn build_remote_child_path_avoids_double_slash_for_root() {
+        assert_eq!(build_remote_child_path("/", "hosts"), "/hosts");
+    }
+
+    #[test]
+    fn remote_edit_transfer_helpers_exist() {
+        let _download = SftpClient::download_file_to_path;
+        let _upload = SftpClient::upload_file_from_path;
+    }
 }
