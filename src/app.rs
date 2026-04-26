@@ -76,6 +76,64 @@ pub struct ActiveTransfer {
     pub needs_refresh: bool, // true until the completion-triggered refresh runs
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteEditSyncState {
+    Opening,
+    Watching,
+    Uploading,
+    UploadFailed,
+    Closed,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct RemoteEditSession {
+    remote_path: String,
+    local_path: PathBuf,
+    last_uploaded_fingerprint: String,
+    last_seen_fingerprint: String,
+    sync_state: RemoteEditSyncState,
+    last_error: Option<String>,
+}
+
+impl RemoteEditSession {
+    fn new(remote_path: String, local_path: PathBuf, initial_fingerprint: String) -> Self {
+        Self {
+            remote_path,
+            local_path,
+            last_uploaded_fingerprint: initial_fingerprint.clone(),
+            last_seen_fingerprint: initial_fingerprint,
+            sync_state: RemoteEditSyncState::Opening,
+            last_error: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn mark_watching(&mut self) {
+        self.sync_state = RemoteEditSyncState::Watching;
+        self.last_error = None;
+    }
+
+    #[allow(dead_code)]
+    fn mark_uploading(&mut self) {
+        self.sync_state = RemoteEditSyncState::Uploading;
+    }
+
+    fn mark_upload_failed(&mut self, error: String) {
+        self.sync_state = RemoteEditSyncState::UploadFailed;
+        self.last_error = Some(error);
+    }
+
+    #[allow(dead_code)]
+    fn mark_uploaded(&mut self, fingerprint: String) {
+        self.last_uploaded_fingerprint = fingerprint.clone();
+        self.last_seen_fingerprint = fingerprint;
+        self.sync_state = RemoteEditSyncState::Watching;
+        self.last_error = None;
+    }
+}
+
 pub struct App {
     pub mode: AppMode,
     pub hosts: Vec<Host>,
@@ -100,6 +158,8 @@ pub struct App {
     pub sftp_pane: Option<SftpPaneState>,
     pub current_host_alias: Option<String>,
     pub active_transfer: Option<ActiveTransfer>,
+    #[allow(dead_code)]
+    remote_edit_session: Option<RemoteEditSession>,
     pub last_ctrl_c: Option<Instant>,
     pub ssh_last_size: Option<(u16, u16)>,
     pub terminal_emulator: Option<TerminalEmulator>,
@@ -160,6 +220,7 @@ impl App {
             sftp_pane: None,
             current_host_alias: None,
             active_transfer: None,
+            remote_edit_session: None,
             last_ctrl_c: None,
             ssh_last_size: None,
             terminal_emulator: None,
@@ -2222,6 +2283,7 @@ mod tests {
             sftp_pane: None,
             current_host_alias: None,
             active_transfer: None,
+            remote_edit_session: None,
             last_ctrl_c: None,
             ssh_last_size: None,
             terminal_emulator: None,
@@ -2366,5 +2428,29 @@ mod tests {
         assert!(title.contains("Password was not saved last time"));
         assert!(title.contains("permission denied by system keyring"));
         assert!(title.contains("Key passphrase (/Users/me/.ssh/id_ed25519):"));
+    }
+
+    #[test]
+    fn remote_edit_session_starts_in_opening_state() {
+        let session = RemoteEditSession::new(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        assert_eq!(session.sync_state, RemoteEditSyncState::Opening);
+        assert_eq!(session.last_uploaded_fingerprint, "hash-1");
+        assert_eq!(session.last_seen_fingerprint, "hash-1");
+    }
+
+    #[test]
+    fn failed_upload_keeps_session_active() {
+        let mut session = RemoteEditSession::new(
+            "/remote/app.conf".into(),
+            PathBuf::from("/tmp/app.conf"),
+            "hash-1".into(),
+        );
+        session.mark_upload_failed("network error".into());
+        assert_eq!(session.sync_state, RemoteEditSyncState::UploadFailed);
+        assert_eq!(session.last_error.as_deref(), Some("network error"));
     }
 }
