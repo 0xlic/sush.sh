@@ -28,6 +28,52 @@ pub struct TransferHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecursiveTransferEvent {
+    CreateDir { relative_path: PathBuf },
+    TransferFile { relative_path: PathBuf, size: u64 },
+    FileConflict { relative_path: PathBuf },
+    Finished,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecursiveTransferDriver {
+    plan: RecursiveTransferPlan,
+    conflicting_files: Vec<PathBuf>,
+}
+
+impl RecursiveTransferDriver {
+    pub fn new(plan: RecursiveTransferPlan, conflicting_files: Vec<PathBuf>) -> Self {
+        Self {
+            plan,
+            conflicting_files,
+        }
+    }
+
+    pub fn collect_events(&self) -> Vec<RecursiveTransferEvent> {
+        let mut events = Vec::new();
+        for directory in &self.plan.directories {
+            events.push(RecursiveTransferEvent::CreateDir {
+                relative_path: directory.relative_path.clone(),
+            });
+        }
+        for file in &self.plan.files {
+            if self.conflicting_files.contains(&file.relative_path) {
+                events.push(RecursiveTransferEvent::FileConflict {
+                    relative_path: file.relative_path.clone(),
+                });
+            } else {
+                events.push(RecursiveTransferEvent::TransferFile {
+                    relative_path: file.relative_path.clone(),
+                    size: file.size,
+                });
+            }
+        }
+        events.push(RecursiveTransferEvent::Finished);
+        events
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedDir {
     pub relative_path: PathBuf,
 }
@@ -407,5 +453,47 @@ mod tests {
         assert_eq!(progress.current_file_bytes, 4);
         assert_eq!(progress.current_file_name.as_deref(), Some("a.txt"));
         assert_eq!(progress.current_file_total_bytes, 10);
+    }
+
+    #[test]
+    fn recursive_driver_creates_directories_before_files() {
+        let plan = RecursiveTransferPlan::upload(
+            PathBuf::from("/local/foo"),
+            "/remote".into(),
+            vec![PlannedDir {
+                relative_path: PathBuf::from("bar"),
+            }],
+            vec![PlannedFile {
+                relative_path: PathBuf::from("bar/a.txt"),
+                size: 10,
+            }],
+        );
+        let steps = RecursiveTransferDriver::new(plan, vec![]).collect_events();
+        assert!(matches!(
+            steps[0],
+            RecursiveTransferEvent::CreateDir { .. }
+        ));
+        assert!(matches!(
+            steps[1],
+            RecursiveTransferEvent::TransferFile { .. }
+        ));
+    }
+
+    #[test]
+    fn recursive_driver_pauses_on_file_conflict() {
+        let plan = RecursiveTransferPlan::upload(
+            PathBuf::from("/local/foo"),
+            "/remote".into(),
+            vec![],
+            vec![PlannedFile {
+                relative_path: PathBuf::from("bar/a.txt"),
+                size: 10,
+            }],
+        );
+        let steps = RecursiveTransferDriver::new(plan, vec![PathBuf::from("bar/a.txt")]).collect_events();
+        assert!(matches!(
+            steps[0],
+            RecursiveTransferEvent::FileConflict { .. }
+        ));
     }
 }
