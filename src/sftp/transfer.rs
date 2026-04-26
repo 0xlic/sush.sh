@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::OpenFlags;
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::fs::OpenOptions;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -184,6 +187,52 @@ impl RecursiveAggregateProgress {
 
 const CHUNK: usize = 32 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DownloadResumeState {
+    offset: u64,
+    append: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UploadResumeState {
+    offset: u64,
+    resume: bool,
+}
+
+fn resume_offset_for_download(total_bytes: u64, existing_size: Option<u64>) -> u64 {
+    match existing_size {
+        Some(size) if size <= total_bytes => size,
+        _ => 0,
+    }
+}
+
+fn resume_offset_for_upload(total_bytes: u64, existing_size: Option<u64>) -> u64 {
+    match existing_size {
+        Some(size) if size <= total_bytes => size,
+        _ => 0,
+    }
+}
+
+fn build_download_resume_state(local: &Path, total_bytes: u64) -> Result<DownloadResumeState> {
+    let existing_size = std::fs::metadata(local).ok().map(|metadata| metadata.len());
+    let offset = resume_offset_for_download(total_bytes, existing_size);
+    Ok(DownloadResumeState {
+        offset,
+        append: offset > 0,
+    })
+}
+
+fn build_upload_resume_state(
+    total_bytes: u64,
+    existing_remote_size: Option<u64>,
+) -> UploadResumeState {
+    let offset = resume_offset_for_upload(total_bytes, existing_remote_size);
+    UploadResumeState {
+        offset,
+        resume: offset > 0,
+    }
+}
+
 pub fn build_local_recursive_plan(
     source_root: &Path,
     destination_parent: &str,
@@ -347,13 +396,25 @@ async fn do_download(
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let resume_state = build_download_resume_state(local, total)?;
     let mut rf = sftp
         .open(remote)
         .await
         .context("failed to open remote file")?;
-    let mut lf = tokio::fs::File::create(local).await?;
+    if resume_state.offset > 0 {
+        rf.seek(SeekFrom::Start(resume_state.offset)).await?;
+    }
+    let mut lf = if resume_state.append {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(local)
+            .await?
+    } else {
+        tokio::fs::File::create(local).await?
+    };
     let mut buf = vec![0u8; CHUNK];
-    let mut acc = 0u64;
+    let mut acc = resume_state.offset;
     loop {
         if cancel.is_cancelled() {
             let _ = tx
@@ -434,12 +495,29 @@ async fn do_upload(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let mut lf = tokio::fs::File::open(local).await?;
-    let mut rf = sftp
-        .create(remote)
+    let remote_size = sftp
+        .metadata(remote)
         .await
-        .context("failed to create remote file")?;
+        .ok()
+        .and_then(|metadata| metadata.size);
+    let resume_state = build_upload_resume_state(total, remote_size);
+    if resume_state.offset > 0 {
+        lf.seek(SeekFrom::Start(resume_state.offset)).await?;
+    }
+    let mut rf = if resume_state.resume {
+        sftp.open_with_flags(
+            remote,
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::APPEND,
+        )
+        .await
+        .context("failed to open remote file for resume")?
+    } else {
+        sftp.create(remote)
+            .await
+            .context("failed to create remote file")?
+    };
     let mut buf = vec![0u8; CHUNK];
-    let mut acc = 0u64;
+    let mut acc = resume_state.offset;
     loop {
         if cancel.is_cancelled() {
             let _ = tx
@@ -719,5 +797,41 @@ mod tests {
             steps[0],
             RecursiveTransferEvent::FileConflict { .. }
         ));
+    }
+
+    #[test]
+    fn download_resume_uses_existing_local_partial_size() {
+        assert_eq!(resume_offset_for_download(100, Some(40)), 40);
+    }
+
+    #[test]
+    fn upload_resume_uses_existing_remote_partial_size() {
+        assert_eq!(resume_offset_for_upload(100, Some(40)), 40);
+    }
+
+    #[test]
+    fn resume_offset_resets_when_target_is_larger_than_source() {
+        assert_eq!(resume_offset_for_download(100, Some(140)), 0);
+        assert_eq!(resume_offset_for_upload(100, Some(140)), 0);
+    }
+
+    #[test]
+    fn local_resume_mode_appends_when_partial_file_exists() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("partial.bin");
+        std::fs::write(&target, b"abcd").unwrap();
+
+        let state = build_download_resume_state(&target, 10).unwrap();
+
+        assert_eq!(state.offset, 4);
+        assert!(state.append);
+    }
+
+    #[test]
+    fn upload_resume_starts_from_existing_remote_size() {
+        let state = build_upload_resume_state(10, Some(4));
+
+        assert_eq!(state.offset, 4);
+        assert!(state.resume);
     }
 }

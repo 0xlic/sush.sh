@@ -4034,6 +4034,16 @@ mod tests {
         assert_eq!(badge.percent, 50);
     }
 
+    #[test]
+    fn queue_badge_percent_uses_resumed_progress_bytes() {
+        let mut app = app_with(vec![]);
+        app.active_transfer = Some(active_transfer_for_test(TransferDir::Download, 40, 100));
+
+        let badge = app.global_transfer_badge().unwrap();
+
+        assert_eq!(badge.percent, 40);
+    }
+
     #[tokio::test]
     async fn busy_upload_request_is_enqueued_instead_of_replacing_active_transfer() {
         let temp = tempfile::tempdir().unwrap();
