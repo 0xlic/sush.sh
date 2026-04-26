@@ -59,6 +59,7 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 **SFTP that doesn't suck**
 - `Tab` to switch between local and remote panels
 - `d` to download, `u` to upload, with a live progress bar
+- `e` to open a remote file in your system's default GUI app and auto-upload on save
 - `Enter` to navigate directories
 
 **Snappy**
@@ -139,8 +140,11 @@ When the folder sidebar is visible, search is scoped to the current folder and t
 | `Enter` | Open directory |
 | `d` | Download selected file |
 | `u` | Upload selected file |
+| `e` | Edit selected remote file locally |
 | `Ctrl-\` | Switch back to SSH shell |
 | `Ctrl-C` × 2 | Return to host list |
+
+When you press `e` on a remote file, `sush` downloads it into a temporary workspace, opens it with the operating system's default app, watches for changes, and auto-uploads after each save. Auto-upload writes to a temporary remote file first, moves the old target aside when needed, and then switches the new file into place.
 
 ---
 
@@ -174,7 +178,7 @@ When the folder sidebar is visible, search is scoped to the current folder and t
 | **v0.4** ✅ | Connection history · recency-boosted search · TCP connectivity probe |
 | **v0.5** ✅ | Path-type tags · main-view folder sidebar · folder jump · scoped `path:` search |
 | **v0.6** ✅ | System keyring credential storage · silent save after successful auth · temporary input only when Secret Service is unavailable |
-| v0.7 | Recursive folder transfer · remote file editing · dual-pane SFTP |
+| v0.7 | Recursive folder transfer · remote file editing with auto-upload on save · dual-pane SFTP |
 | v0.8 | Port forwarding · ProxyJump chains · SOCKS5 proxy |
 | v1.0 | Homebrew/AUR/Scoop · man page · full platform testing |
 
