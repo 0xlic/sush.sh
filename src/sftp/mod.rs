@@ -79,7 +79,10 @@ impl SftpPaneState {
         let index = self.selected_index();
         match self.side {
             PaneSide::Local => {
-                if self.local_pending_anchor.is_some_and(|pending| pending != index) {
+                if self
+                    .local_pending_anchor
+                    .is_some_and(|pending| pending != index)
+                {
                     self.local_selection_anchor = self.local_pending_anchor;
                     self.local_pending_anchor = None;
                 }
@@ -115,7 +118,10 @@ impl SftpPaneState {
                 self.local_last_space_index = Some(index);
             }
             PaneSide::Remote => {
-                if self.remote_pending_anchor.is_some_and(|pending| pending != index) {
+                if self
+                    .remote_pending_anchor
+                    .is_some_and(|pending| pending != index)
+                {
                     self.remote_selection_anchor = self.remote_pending_anchor;
                     self.remote_pending_anchor = None;
                 }
