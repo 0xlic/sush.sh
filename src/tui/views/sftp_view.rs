@@ -144,7 +144,7 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
-    use super::{SftpLayoutMode, layout_mode_for_width};
+    use super::{DUAL_PANE_MIN_WIDTH, SftpLayoutMode, layout_mode_for_width};
 
     #[test]
     fn wide_width_uses_dual_pane_layout() {
@@ -154,5 +154,13 @@ mod tests {
     #[test]
     fn narrow_width_uses_single_active_pane_layout() {
         assert_eq!(layout_mode_for_width(70), SftpLayoutMode::SinglePane);
+    }
+
+    #[test]
+    fn width_at_threshold_enables_dual_pane() {
+        assert_eq!(
+            layout_mode_for_width(DUAL_PANE_MIN_WIDTH),
+            SftpLayoutMode::DualPane
+        );
     }
 }

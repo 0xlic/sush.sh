@@ -1046,7 +1046,8 @@ impl App {
                 return;
             }
             let i = pane.selected_index();
-            pane.active_list_state_mut().select(Some((i + 1).min(len - 1)));
+            pane.active_list_state_mut()
+                .select(Some((i + 1).min(len - 1)));
         }
     }
 
