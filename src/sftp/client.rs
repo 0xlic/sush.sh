@@ -80,6 +80,7 @@ impl SftpClient {
 
     pub async fn upload_file_from_path(&self, local_path: &Path, remote_path: &str) -> Result<()> {
         let temp_remote_path = build_remote_edit_temp_path(remote_path);
+        let backup_remote_path = build_remote_edit_backup_path(remote_path);
         let mut local = tokio::fs::File::open(local_path)
             .await
             .with_context(|| format!("failed to open local file: {}", local_path.display()))?;
@@ -99,12 +100,34 @@ impl SftpClient {
         }
 
         drop(remote);
-        self.session
-            .rename(&temp_remote_path, remote_path)
-            .await
-            .with_context(|| {
-                format!("failed to replace remote file: {temp_remote_path} -> {remote_path}")
-            })?;
+        let target_exists = self.session.metadata(remote_path).await.is_ok();
+        if target_exists {
+            let _ = self.session.remove_file(&backup_remote_path).await;
+            self.session
+                .rename(remote_path, &backup_remote_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to move existing remote file aside: {remote_path} -> {backup_remote_path}"
+                    )
+                })?;
+        }
+
+        match self.session.rename(&temp_remote_path, remote_path).await {
+            Ok(()) => {
+                if target_exists {
+                    let _ = self.session.remove_file(&backup_remote_path).await;
+                }
+            }
+            Err(error) => {
+                if target_exists {
+                    let _ = self.session.rename(&backup_remote_path, remote_path).await;
+                }
+                return Err(error).with_context(|| {
+                    format!("failed to replace remote file: {temp_remote_path} -> {remote_path}")
+                });
+            }
+        }
 
         Ok(())
     }
@@ -129,6 +152,19 @@ fn build_remote_edit_temp_path(remote_path: &str) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "remote-edit".into());
     build_remote_child_path(&parent, &format!(".{filename}.sush-upload.tmp"))
+}
+
+fn build_remote_edit_backup_path(remote_path: &str) -> String {
+    let path = Path::new(remote_path);
+    let parent = path
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".into());
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "remote-edit".into());
+    build_remote_child_path(&parent, &format!(".{filename}.sush-backup.tmp"))
 }
 
 pub fn list_local(path: &std::path::Path) -> Result<Vec<FileEntry>> {
@@ -170,6 +206,14 @@ mod tests {
         assert_eq!(
             build_remote_edit_temp_path("/etc/hosts"),
             "/etc/.hosts.sush-upload.tmp"
+        );
+    }
+
+    #[test]
+    fn build_remote_edit_backup_path_stays_in_same_directory() {
+        assert_eq!(
+            build_remote_edit_backup_path("/etc/hosts"),
+            "/etc/.hosts.sush-backup.tmp"
         );
     }
 
