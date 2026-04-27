@@ -111,6 +111,7 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
             ("/", "Search"),
             ("Enter", "SSH"),
             ("s", "SFTP"),
+            ("p", "Forwards"),
             ("n", "New"),
             ("e", "Edit"),
             ("d", "Delete"),

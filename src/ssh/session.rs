@@ -3,8 +3,31 @@ use russh::client::{self, Handle, Msg};
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::{Channel, ChannelMsg, Disconnect};
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
-pub struct ClientHandler;
+pub struct ClientHandler {
+    forwarded_tcpip_tx: Option<UnboundedSender<Channel<Msg>>>,
+}
+
+impl ClientHandler {
+    pub fn new() -> Self {
+        Self {
+            forwarded_tcpip_tx: None,
+        }
+    }
+
+    pub fn with_forwarded_tcpip(tx: UnboundedSender<Channel<Msg>>) -> Self {
+        Self {
+            forwarded_tcpip_tx: Some(tx),
+        }
+    }
+}
+
+impl Default for ClientHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl client::Handler for ClientHandler {
     type Error = anyhow::Error;
@@ -16,6 +39,21 @@ impl client::Handler for ClientHandler {
         // v0.1: TOFU, accept all keys; v0.3 may add known_hosts verification.
         Ok(true)
     }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        _connected_address: &str,
+        _connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(tx) = &self.forwarded_tcpip_tx {
+            let _ = tx.send(channel);
+        }
+        Ok(())
+    }
 }
 
 pub struct ActiveSession {
@@ -25,8 +63,16 @@ pub struct ActiveSession {
 
 impl ActiveSession {
     pub async fn connect(hostname: &str, port: u16) -> Result<Self> {
+        Self::connect_with_handler(hostname, port, ClientHandler::default()).await
+    }
+
+    pub async fn connect_with_handler(
+        hostname: &str,
+        port: u16,
+        handler: ClientHandler,
+    ) -> Result<Self> {
         let config = Arc::new(client::Config::default());
-        let handle = client::connect(config, (hostname, port), ClientHandler)
+        let handle = client::connect(config, (hostname, port), handler)
             .await
             .with_context(|| format!("failed to connect to {hostname}:{port}"))?;
         Ok(Self {

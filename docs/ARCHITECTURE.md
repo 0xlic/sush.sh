@@ -47,6 +47,7 @@
 │           │ 主界面    │ 搜索框 + 目录栏 + 主机列表 + 快捷键栏 │
 │           │ SSH 终端  │ 嵌入式终端 widget + 状态栏     │
 │           │ SFTP 面板 │ 自适应双面板浏览器 + 紧凑传输 badge │
+│           │ 转发管理  │ 双面板规则视图 + daemon 状态     │
 │           └────┬─────┘                              │
 │                │ 事件                                │
 │           ┌────▼─────┐                              │
@@ -56,14 +57,14 @@
 │  ┌─────────────┼─────────────┐                      │
 │  │             │             │                      │
 │  ▼             ▼             ▼                      │
-│ ┌──────┐  ┌──────┐  ┌───────────┐                  │
-│ │Config│  │ SSH  │  │   SFTP    │                  │
-│ │管理   │  │连接   │  │ 文件操作   │                  │
-│ └──┬───┘  └──┬───┘  └─────┬─────┘                  │
-│    │         │             │                        │
-│    ▼         └──────┬──────┘                        │
+│ ┌──────┐  ┌──────┐  ┌───────────┐  ┌───────────┐   │
+│ │Config│  │ SSH  │  │   SFTP    │  │  tunnel   │   │
+│ │管理   │  │连接   │  │ 文件操作   │  │ daemon/IPC │   │
+│ └──┬───┘  └──┬───┘  └─────┬─────┘  └─────┬─────┘   │
+│    │         │             │              │         │
+│    ▼         └──────┬──────┴──────────────┘         │
 │ hosts.toml     ┌────▼────┐                          │
-│ ~/.ssh/config  │  russh  │ (SSH + SFTP 共享连接)     │
+│ ~/.ssh/config  │  russh  │ (SSH / SFTP / Port Forward 共享能力) │
 │                └─────────┘                          │
 └─────────────────────────────────────────────────────┘
 ```
@@ -86,7 +87,14 @@ src/
 │   ├── mod.rs           # SSH 模块入口
 │   ├── session.rs       # russh 会话管理
 │   ├── auth.rs          # 认证策略（agent → key → password）
+│   ├── proxy_jump.rs    # ProxyJump 单跳 direct-tcpip + connect_stream
 │   └── terminal.rs      # alacritty_terminal 封装，维护虚拟屏幕状态
+├── tunnel/
+│   ├── mod.rs           # 端口转发模块入口
+│   ├── ipc.rs           # daemon <-> TUI 的 Unix socket 协议
+│   ├── daemon.rs        # 守护进程、规则状态机、自动重连
+│   ├── client.rs        # TUI 侧 IPC client，负责自动拉起 daemon
+│   └── forward.rs       # 本地 / 远程 / 动态转发实现
 ├── sftp/
 │   ├── mod.rs           # SFTP 模块入口
 │   ├── client.rs        # SFTP 操作封装
@@ -101,6 +109,8 @@ src/
 │   │   ├── sftp_view.rs     # SFTP 文件浏览器
 │   │   ├── edit_view.rs     # 主机新建/编辑全屏表单
 │   │   ├── import_view.rs   # SSH config 手动导入选择视图
+│   │   ├── forwarding_view.rs  # 转发规则双面板状态视图
+│   │   ├── forward_edit.rs     # 转发规则新建/编辑弹层
 │   │   └── password_dialog.rs  # 密码输入弹窗
 │   └── widgets/
 │       ├── search_input.rs  # 搜索框组件
@@ -125,6 +135,7 @@ enum AppMode {
     Main,             // 主界面：搜索 + 主机列表
     Ssh,              // SSH 嵌入式终端模式
     Sftp,             // SFTP 文件浏览器
+    ForwardingManager,// 端口转发管理
     Edit,             // 主机新建/编辑全屏表单
     ImportSshConfig,  // SSH config 手动导入选择视图
 }
@@ -146,6 +157,8 @@ enum AppMode {
  Main ──────→ ImportSshConfig（选择导入，Enter 确认，ESC 取消）
         首次启动（hosts 为空且未提示过）
  Main ← ConfirmDialog → ImportSshConfig
+       p
+Main ──────→ ForwardingManager（规则状态、启动/停止、编辑）
 ```
 
 ## v0.5 虚拟目录导航
@@ -258,6 +271,39 @@ v0.6 起，登录密码和私钥口令都优先从系统安全存储读取：
 - Linux 使用 Secret Service
 
 凭证不会写入 `hosts.toml`。只有认证成功后，`App` 才会静默尝试把本次手工输入的登录密码或私钥口令保存到系统钥匙串；保存失败不会影响当前连接，只会把失败原因写入本地 metadata，供下次再次输入时提示。
+
+## v0.8 端口转发守护进程
+
+v0.8 新增 `tunnel/` 模块，把“转发规则配置”和“转发运行时”解耦：
+
+- `Host.forwards` 持久化规则定义，规则类型包括 `Local`、`Remote`、`Dynamic`
+- `daemon.rs` 在 Unix 平台启动独立守护进程，监听 `~/.config/sush/daemon.sock`
+- `client.rs` 由 TUI 侧通过 IPC 拉起或连接 daemon，查询状态并发送 `start/stop/status`
+- `forward.rs` 负责三种转发的运行时：
+  - 本地转发：本地监听 + `direct-tcpip`
+  - 动态转发：最小 SOCKS5 CONNECT + `direct-tcpip`
+  - 远程转发：`tcpip_forward` + `forwarded-tcpip` 回连到本地端口
+
+### 状态模型
+
+每条规则在 daemon 内维护独立状态：
+
+- `Stopped`：未运行
+- `Connecting`：正在建立 SSH / ProxyJump / 监听端口
+- `Running`：转发正常运行
+- `Reconnecting`：连接断开后按退避重试
+- `Error`：超过最大重试次数，或配置错误（如跳板机不存在）
+
+### ProxyJump
+
+v0.8 只支持单跳 ProxyJump：
+
+1. 使用跳板机 `Host` 配置建立并认证第一段 SSH
+2. 在跳板机上打开到目标主机的 `direct-tcpip` channel
+3. 把该 channel 转成 stream，再通过 `russh::client::connect_stream` 建立第二段 SSH
+4. 再对目标主机执行认证与后续转发
+
+跳板机引用使用 `Host.proxy_jump = Some(alias)`；daemon 启动规则时按 alias 在当前配置中解析对应主机。
 
 Linux 若没有可用的 Secret Service：
 

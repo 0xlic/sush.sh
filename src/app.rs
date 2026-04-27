@@ -55,6 +55,45 @@ pub enum AppMode {
     ImportSshConfig,
     #[allow(dead_code)]
     FolderView,
+    ForwardingManager,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardingFocus {
+    HostList,
+    RuleList,
+}
+
+pub struct ForwardingViewState {
+    pub focus: ForwardingFocus,
+    pub host_list_state: ListState,
+    pub rule_list_state: ListState,
+    pub host_indices: Vec<usize>,
+    pub statuses: Vec<crate::tunnel::ipc::ForwardStatus>,
+}
+
+impl ForwardingViewState {
+    pub fn new(hosts: &[Host]) -> Self {
+        let host_indices: Vec<usize> = hosts.iter().enumerate().map(|(index, _)| index).collect();
+        let mut host_list_state = ListState::default();
+        if !host_indices.is_empty() {
+            host_list_state.select(Some(0));
+        }
+        Self {
+            focus: ForwardingFocus::HostList,
+            host_list_state,
+            rule_list_state: ListState::default(),
+            host_indices,
+            statuses: vec![],
+        }
+    }
+
+    pub fn selected_host_idx(&self) -> Option<usize> {
+        self.host_list_state
+            .selected()
+            .and_then(|i| self.host_indices.get(i))
+            .copied()
+    }
 }
 
 struct PwdDialog {
@@ -411,6 +450,8 @@ pub struct App {
     pub show_import_prompt: bool,
     pub folder_view_state: Option<FolderViewState>,
     pub folder_host_indices: Vec<usize>,
+    pub forwarding_state: Option<ForwardingViewState>,
+    pub forward_edit: Option<crate::tui::views::forward_edit::ForwardEditState>,
     secret_store: SecretStore,
     pwd_dialog: Option<PwdDialog>,
 }
@@ -482,6 +523,8 @@ impl App {
             show_import_prompt: false,
             folder_view_state: None,
             folder_host_indices: vec![],
+            forwarding_state: None,
+            forward_edit: None,
             secret_store: SecretStore::new(Box::new(SystemSecretBackend::new())),
             pwd_dialog: None,
         })
@@ -729,6 +772,11 @@ impl App {
             self.status_msg = None;
         }
         // Connectivity probe — only in Main mode.
+        if self.mode == AppMode::ForwardingManager
+            && let Some(state) = &mut self.forwarding_state
+        {
+            state.statuses = crate::tunnel::client::daemon_status().await;
+        }
         if self.mode == AppMode::Main {
             // Collect completed probe result.
             if let Some(rx) = &mut self.probe_rx
@@ -775,7 +823,7 @@ impl App {
         }
 
         match self.mode {
-            AppMode::Main | AppMode::Sftp => {
+            AppMode::Main | AppMode::Sftp | AppMode::ForwardingManager => {
                 for key in decode_tui_keys(&data) {
                     self.handle_key(key);
                 }
@@ -831,6 +879,7 @@ impl App {
         match self.mode {
             AppMode::Main => self.handle_main_key(k),
             AppMode::Sftp => self.handle_sftp_key(k),
+            AppMode::ForwardingManager => self.handle_forwarding_key(k),
             AppMode::Ssh | AppMode::Edit | AppMode::ImportSshConfig | AppMode::FolderView => {}
         }
     }
@@ -930,6 +979,11 @@ impl App {
             }
             (KeyCode::Char('f'), KeyModifiers::NONE) => {
                 self.toggle_folder_sidebar();
+            }
+            (KeyCode::Char('p'), KeyModifiers::NONE) => {
+                self.forwarding_state = Some(ForwardingViewState::new(&self.hosts));
+                self.forward_edit = None;
+                self.mode = AppMode::ForwardingManager;
             }
             _ => {}
         }
@@ -1532,6 +1586,242 @@ impl App {
         }
         self.import_state = Some(ImportViewState::new(ssh_hosts, &self.hosts));
         self.mode = AppMode::ImportSshConfig;
+    }
+
+    fn rebuild_forwarding_state(&mut self) {
+        let mut next = ForwardingViewState::new(&self.hosts);
+        if let Some(previous) = &self.forwarding_state {
+            next.statuses = previous.statuses.clone();
+        }
+        self.forwarding_state = Some(next);
+    }
+
+    fn handle_forwarding_key(&mut self, k: KeyEvent) {
+        use crate::tui::views::forward_edit::{EditField as ForwardEditField, ForwardEditState};
+
+        if self.forward_edit.is_some() {
+            self.handle_forward_edit_key(k);
+            return;
+        }
+
+        let Some(state) = &mut self.forwarding_state else {
+            return;
+        };
+
+        match (k.code, k.modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Esc, _) => {
+                self.mode = AppMode::Main;
+                self.forwarding_state = None;
+                self.forward_edit = None;
+            }
+            (KeyCode::Tab, _) => {
+                state.focus = match state.focus {
+                    ForwardingFocus::HostList => {
+                        state.rule_list_state = ListState::default();
+                        if let Some(host_i) = state.selected_host_idx() {
+                            let count = self.hosts[host_i].forwards.len();
+                            if count > 0 {
+                                state.rule_list_state.select(Some(0));
+                            }
+                        }
+                        ForwardingFocus::RuleList
+                    }
+                    ForwardingFocus::RuleList => ForwardingFocus::HostList,
+                };
+            }
+            (KeyCode::Up, _) => match state.focus {
+                ForwardingFocus::HostList => {
+                    let count = state.host_indices.len();
+                    if count > 0 {
+                        let current = state.host_list_state.selected().unwrap_or(0);
+                        state
+                            .host_list_state
+                            .select(Some(current.saturating_sub(1)));
+                        state.rule_list_state = ListState::default();
+                    }
+                }
+                ForwardingFocus::RuleList => {
+                    let current = state.rule_list_state.selected().unwrap_or(0);
+                    state
+                        .rule_list_state
+                        .select(Some(current.saturating_sub(1)));
+                }
+            },
+            (KeyCode::Down, _) => match state.focus {
+                ForwardingFocus::HostList => {
+                    let count = state.host_indices.len();
+                    if count > 0 {
+                        let current = state.host_list_state.selected().unwrap_or(0);
+                        state
+                            .host_list_state
+                            .select(Some((current + 1).min(count - 1)));
+                        state.rule_list_state = ListState::default();
+                    }
+                }
+                ForwardingFocus::RuleList => {
+                    let count = state
+                        .selected_host_idx()
+                        .map(|idx| self.hosts[idx].forwards.len())
+                        .unwrap_or(0);
+                    if count > 0 {
+                        let current = state.rule_list_state.selected().unwrap_or(0);
+                        state
+                            .rule_list_state
+                            .select(Some((current + 1).min(count - 1)));
+                    }
+                }
+            },
+            (KeyCode::Enter, _) if state.focus == ForwardingFocus::RuleList => {
+                if let Some(host_idx) = state.selected_host_idx()
+                    && let Some(rule_idx) = state.rule_list_state.selected()
+                    && let Some(rule) = self.hosts[host_idx].forwards.get(rule_idx)
+                {
+                    let rule_id = rule.id.clone();
+                    let is_active = state
+                        .statuses
+                        .iter()
+                        .find(|status| status.id == rule_id)
+                        .map(|status| status.state.is_active())
+                        .unwrap_or(false);
+                    tokio::spawn(async move {
+                        if is_active {
+                            let _ = crate::tunnel::client::daemon_stop(&rule_id).await;
+                        } else {
+                            let _ = crate::tunnel::client::daemon_start(&rule_id).await;
+                        }
+                    });
+                }
+            }
+            (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                if let Some(host_idx) = state.selected_host_idx() {
+                    let host = &self.hosts[host_idx];
+                    self.forward_edit =
+                        Some(ForwardEditState::new(host.id.clone(), host.alias.clone()));
+                }
+            }
+            (KeyCode::Char('e'), KeyModifiers::NONE)
+                if state.focus == ForwardingFocus::RuleList =>
+            {
+                if let Some(host_idx) = state.selected_host_idx()
+                    && let Some(rule_idx) = state.rule_list_state.selected()
+                    && let Some(rule) = self.hosts[host_idx].forwards.get(rule_idx)
+                {
+                    let host = &self.hosts[host_idx];
+                    self.forward_edit = Some(ForwardEditState::from_rule(
+                        host.id.clone(),
+                        host.alias.clone(),
+                        rule,
+                    ));
+                }
+            }
+            (KeyCode::Char('d'), KeyModifiers::NONE)
+                if state.focus == ForwardingFocus::RuleList =>
+            {
+                if let Some(host_idx) = state.selected_host_idx()
+                    && let Some(rule_idx) = state.rule_list_state.selected()
+                    && rule_idx < self.hosts[host_idx].forwards.len()
+                {
+                    self.hosts[host_idx].forwards.remove(rule_idx);
+                    self.save_hosts_to_disk();
+                    self.rebuild_forwarding_state();
+                }
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                if let Some(edit) = &mut self.forward_edit
+                    && edit.focused == ForwardEditField::AutoStart
+                {
+                    edit.auto_start = !edit.auto_start;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_forward_edit_key(&mut self, k: KeyEvent) {
+        use crate::tui::views::forward_edit::EditField;
+
+        let Some(edit) = &mut self.forward_edit else {
+            return;
+        };
+
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => {
+                self.forward_edit = None;
+            }
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) => match edit.validate() {
+                Ok(rule) => {
+                    let host_id = edit.host_id.clone();
+                    let is_new = edit.forward_id.is_none();
+                    if let Some(host) = self.hosts.iter_mut().find(|host| host.id == host_id) {
+                        if is_new {
+                            host.forwards.push(rule);
+                        } else if let Some(existing) = host
+                            .forwards
+                            .iter_mut()
+                            .find(|existing| existing.id == rule.id)
+                        {
+                            *existing = rule;
+                        }
+                    }
+                    self.save_hosts_to_disk();
+                    self.rebuild_forwarding_state();
+                    self.forward_edit = None;
+                }
+                Err(message) => {
+                    edit.error = Some(message);
+                }
+            },
+            (KeyCode::Tab, _) | (KeyCode::Down, _) => {
+                edit.focused = edit.focused.next(edit.kind_idx);
+                edit.error = None;
+            }
+            (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
+                edit.focused = edit.focused.prev(edit.kind_idx);
+                edit.error = None;
+            }
+            (KeyCode::Left, _) if edit.focused == EditField::Kind => {
+                edit.kind_idx = edit.kind_idx.saturating_sub(1);
+                if edit.kind_idx == 2 && edit.focused == EditField::RemotePort {
+                    edit.focused = EditField::AutoStart;
+                }
+            }
+            (KeyCode::Right, _) if edit.focused == EditField::Kind => {
+                edit.kind_idx = (edit.kind_idx + 1).min(2);
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE) if edit.focused == EditField::Kind => {
+                edit.kind_idx = (edit.kind_idx + 1) % 3;
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE) if edit.focused == EditField::AutoStart => {
+                edit.auto_start = !edit.auto_start;
+            }
+            (KeyCode::Char(c), KeyModifiers::NONE) => {
+                let target = match edit.focused {
+                    EditField::Name => Some(&mut edit.name),
+                    EditField::LocalPort => Some(&mut edit.local_port),
+                    EditField::RemoteHost => Some(&mut edit.remote_host),
+                    EditField::RemotePort => Some(&mut edit.remote_port),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    target.push(c);
+                    edit.error = None;
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                let target = match edit.focused {
+                    EditField::Name => Some(&mut edit.name),
+                    EditField::LocalPort => Some(&mut edit.local_port),
+                    EditField::RemoteHost => Some(&mut edit.remote_host),
+                    EditField::RemotePort => Some(&mut edit.remote_port),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    target.pop();
+                    edit.error = None;
+                }
+            }
+            _ => {}
+        }
     }
 
     fn save_hosts_to_disk(&self) {
@@ -3178,6 +3468,14 @@ impl App {
                     import_view::render(f, state);
                 }
             }
+            AppMode::ForwardingManager => {
+                if let Some(state) = &mut self.forwarding_state {
+                    crate::tui::views::forwarding_view::render(f, state, &self.hosts);
+                }
+                if let Some(edit) = &self.forward_edit {
+                    crate::tui::views::forward_edit::render(f, edit);
+                }
+            }
             AppMode::FolderView => {
                 if let Some(fv) = &self.folder_view_state {
                     let probe: Option<Option<bool>> = if self.probe_result.is_some() {
@@ -3456,6 +3754,8 @@ mod tests {
             show_import_prompt: false,
             folder_view_state: None,
             folder_host_indices: vec![],
+            forwarding_state: None,
+            forward_edit: None,
             secret_store: SecretStore::new(Box::new(FakeBackend::available())),
             pwd_dialog: None,
         }
@@ -3581,6 +3881,52 @@ mod tests {
                 files: vec![],
             },
         }
+    }
+
+    #[test]
+    fn forwarding_view_state_lists_hosts_without_rules_for_creation() {
+        let mut host_without_rules = mk("a");
+        let mut host_with_rules = mk("b");
+        host_with_rules
+            .forwards
+            .push(crate::config::host::ForwardRule {
+                id: "fwd-1".into(),
+                name: "web".into(),
+                kind: crate::config::host::ForwardKind::Local,
+                local_port: 8080,
+                remote_host: Some("localhost".into()),
+                remote_port: Some(80),
+                auto_start: false,
+            });
+        host_without_rules.forwards.clear();
+
+        let state = ForwardingViewState::new(&[host_without_rules, host_with_rules]);
+
+        assert_eq!(state.host_indices, vec![0, 1]);
+        assert_eq!(state.host_list_state.selected(), Some(0));
+        assert_eq!(state.selected_host_idx(), Some(0));
+    }
+
+    #[test]
+    fn p_key_opens_forwarding_manager() {
+        let mut app = app_with(vec![mk("web")]);
+
+        app.handle_main_key_hostlist(KeyEvent::from(KeyCode::Char('p')));
+
+        assert_eq!(app.mode, AppMode::ForwardingManager);
+        assert!(app.forwarding_state.is_some());
+    }
+
+    #[test]
+    fn n_key_opens_forward_creation_for_host_without_existing_rules() {
+        let mut app = app_with(vec![mk("web")]);
+
+        app.handle_main_key_hostlist(KeyEvent::from(KeyCode::Char('p')));
+        app.handle_forwarding_key(KeyEvent::from(KeyCode::Char('n')));
+
+        let edit = app.forward_edit.as_ref().expect("forward edit should open");
+        assert_eq!(edit.host_id, "web");
+        assert_eq!(edit.host_alias, "web");
     }
 
     #[test]

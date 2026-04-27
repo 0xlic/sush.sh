@@ -7,6 +7,8 @@ use tokio::sync::Mutex;
 
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 
 use crate::config::store;
 use crate::tunnel::ipc::{self, ForwardState, ForwardStatus, IpcRequest, IpcResponse, MAX_RETRIES};
@@ -33,7 +35,10 @@ struct RuntimeFiles {
 
 impl RuntimeFiles {
     fn new(sock_path: std::path::PathBuf, pid_path: std::path::PathBuf) -> Self {
-        Self { sock_path, pid_path }
+        Self {
+            sock_path,
+            pid_path,
+        }
     }
 }
 
@@ -61,6 +66,7 @@ struct RuleState {
     retry_count: u32,
     error: Option<String>,
     cancel: Option<tokio_util::sync::CancellationToken>,
+    stopped: bool,
 }
 
 #[allow(dead_code)]
@@ -71,6 +77,7 @@ impl RuleState {
             retry_count: 0,
             error: None,
             cancel: None,
+            stopped: false,
         }
     }
 
@@ -79,6 +86,7 @@ impl RuleState {
         self.retry_count = 0;
         self.error = None;
         self.cancel = Some(cancel);
+        self.stopped = false;
     }
 
     fn on_disconnect(&mut self) {
@@ -96,12 +104,14 @@ impl RuleState {
         self.state = ForwardState::Error;
         self.error = Some(msg);
         self.cancel = None;
+        self.stopped = false;
     }
 
     fn reset_for_manual_start(&mut self) {
         self.state = ForwardState::Connecting;
         self.retry_count = 0;
         self.error = None;
+        self.stopped = false;
     }
 
     fn stop(&mut self) {
@@ -111,6 +121,7 @@ impl RuleState {
         self.state = ForwardState::Stopped;
         self.retry_count = 0;
         self.error = None;
+        self.stopped = true;
     }
 }
 
@@ -144,6 +155,7 @@ pub async fn run_daemon() -> Result<()> {
     for host in &config_store.hosts {
         for rule in &host.forwards {
             if rule.auto_start {
+                let _ = prepare_rule_for_start(&state, &rule.id).await;
                 let state = Arc::clone(&state);
                 let host_clone = host.clone();
                 let rule_clone = rule.clone();
@@ -160,33 +172,40 @@ pub async fn run_daemon() -> Result<()> {
     ensure_runtime_parent(&pid_path)?;
     std::fs::write(&pid_path, std::process::id().to_string())?;
     let _runtime_files = RuntimeFiles::new(sock_path.clone(), pid_path);
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
     eprintln!("sush daemon listening on {sock_path:?}");
 
-    let hosts = config_store.hosts.clone();
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let state = Arc::clone(&state);
-                let hosts = hosts.clone();
-                tokio::spawn(handle_connection(stream, state, hosts));
+        tokio::select! {
+            _ = sigterm.recv() => {
+                break;
             }
-            Err(e) => eprintln!("daemon accept error: {e}"),
+            _ = sigint.recv() => {
+                break;
+            }
+            accept = listener.accept() => {
+                match accept {
+                    Ok((stream, _)) => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(handle_connection(stream, state));
+                    }
+                    Err(e) => eprintln!("daemon accept error: {e}"),
+                }
+            }
         }
     }
+    Ok(())
 }
 
 #[cfg(unix)]
-async fn handle_connection(
-    stream: UnixStream,
-    state: SharedState,
-    hosts: Vec<crate::config::host::Host>,
-) {
+async fn handle_connection(stream: UnixStream, state: SharedState) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
         let response = match serde_json::from_str::<IpcRequest>(&line) {
-            Ok(req) => handle_request(req, &state, &hosts).await,
+            Ok(req) => handle_request(req, &state).await,
             Err(e) => IpcResponse::Error {
                 message: e.to_string(),
             },
@@ -200,7 +219,20 @@ async fn handle_connection(
 }
 
 #[cfg(unix)]
-async fn handle_request(
+async fn handle_request(req: IpcRequest, state: &SharedState) -> IpcResponse {
+    let hosts = match store::load_store(&store::config_path()) {
+        Ok(store_data) => store_data.hosts,
+        Err(error) => {
+            return IpcResponse::Error {
+                message: format!("failed to load config: {error}"),
+            };
+        }
+    };
+    sync_state_with_hosts(state, &hosts).await;
+    handle_request_with_hosts(req, state, &hosts).await
+}
+
+async fn handle_request_with_hosts(
     req: IpcRequest,
     state: &SharedState,
     hosts: &[crate::config::host::Host],
@@ -229,15 +261,15 @@ async fn handle_request(
             let (host_opt, rule_opt) = find_rule(hosts, &forward_id);
             match (host_opt, rule_opt) {
                 (Some(host), Some(rule)) => {
-                    {
-                        let mut locked = state.lock().await;
-                        let entry = locked
-                            .entry(forward_id.clone())
-                            .or_insert_with(RuleState::new);
-                        if entry.state.is_active() {
+                    if !prepare_rule_for_start(state, &forward_id).await {
+                        let locked = state.lock().await;
+                        if locked
+                            .get(&forward_id)
+                            .map(|entry| entry.state.is_active())
+                            .unwrap_or(false)
+                        {
                             return IpcResponse::Ok;
                         }
-                        entry.reset_for_manual_start();
                     }
                     let state = Arc::clone(state);
                     let host = host.clone();
@@ -270,6 +302,65 @@ async fn handle_request(
     }
 }
 
+async fn sync_state_with_hosts(state: &SharedState, hosts: &[crate::config::host::Host]) {
+    let active_ids: std::collections::HashSet<String> = hosts
+        .iter()
+        .flat_map(|host| host.forwards.iter().map(|rule| rule.id.clone()))
+        .collect();
+
+    let mut locked = state.lock().await;
+    for host in hosts {
+        for rule in &host.forwards {
+            locked.entry(rule.id.clone()).or_insert_with(RuleState::new);
+        }
+    }
+
+    let stale_ids: Vec<String> = locked
+        .keys()
+        .filter(|rule_id| !active_ids.contains(*rule_id))
+        .cloned()
+        .collect();
+    for stale_id in stale_ids {
+        if let Some(mut rule_state) = locked.remove(&stale_id) {
+            rule_state.stop();
+        }
+    }
+}
+
+async fn prepare_rule_for_start(state: &SharedState, rule_id: &str) -> bool {
+    let mut locked = state.lock().await;
+    let entry = locked
+        .entry(rule_id.to_string())
+        .or_insert_with(RuleState::new);
+    if entry.state.is_active() {
+        return false;
+    }
+    entry.reset_for_manual_start();
+    true
+}
+
+async fn sleep_or_stop(state: &SharedState, rule_id: &str, wait_secs: u64) -> bool {
+    let sleep = tokio::time::sleep(std::time::Duration::from_secs(wait_secs));
+    tokio::pin!(sleep);
+
+    loop {
+        if state
+            .lock()
+            .await
+            .get(rule_id)
+            .map(|rs| rs.stopped)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+
+        tokio::select! {
+            _ = &mut sleep => return true,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+    }
+}
+
 fn find_rule<'a>(
     hosts: &'a [crate::config::host::Host],
     forward_id: &str,
@@ -295,8 +386,200 @@ async fn start_rule_task(
     all_hosts: &[crate::config::host::Host],
     state: SharedState,
 ) {
-    eprintln!("start_rule_task: {} (not yet implemented)", rule.id);
-    let _ = (host, rule, all_hosts, &state);
+    use crate::config::host::ForwardKind;
+    use crate::ssh::auth;
+    use crate::ssh::proxy_jump;
+    use crate::ssh::session::{ActiveSession, ClientHandler};
+    use crate::tunnel::forward;
+
+    let rule_id = rule.id.clone();
+    let backoff_secs = [1u64, 2, 4, 8, 16, 30];
+
+    loop {
+        let mut forwarded_rx = None;
+        let handler = if matches!(rule.kind, ForwardKind::Remote) {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            forwarded_rx = Some(rx);
+            ClientHandler::with_forwarded_tcpip(tx)
+        } else {
+            ClientHandler::default()
+        };
+
+        let handle_result = if let Some(ref jump_alias) = host.proxy_jump {
+            match all_hosts
+                .iter()
+                .find(|candidate| candidate.alias == *jump_alias)
+            {
+                Some(bastion) => {
+                    proxy_jump::connect_via_proxy_jump_with_handler(bastion, host, handler).await
+                }
+                None => Err(anyhow::anyhow!("proxy jump host '{jump_alias}' not found")),
+            }
+        } else {
+            match ActiveSession::connect_with_handler(&host.hostname, host.port, handler).await {
+                Ok(mut session) => match auth::authenticate(&mut session.handle, host).await {
+                    Ok(()) => Ok(session.handle),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            }
+        };
+
+        let handle = match handle_result {
+            Ok(handle) => handle,
+            Err(error) => {
+                if is_fatal_error(&error) {
+                    let mut locked = state.lock().await;
+                    if let Some(rs) = locked.get_mut(&rule_id) {
+                        rs.on_fatal_error(error.to_string());
+                    }
+                    return;
+                }
+                let maybe_wait = {
+                    let mut locked = state.lock().await;
+                    locked.get_mut(&rule_id).map(|rs| {
+                        rs.on_disconnect();
+                        let retry = rs.retry_count as usize;
+                        (
+                            rs.state.clone(),
+                            backoff_secs
+                                .get(retry.saturating_sub(1))
+                                .copied()
+                                .unwrap_or(30),
+                        )
+                    })
+                };
+                let Some((next_state, wait)) = maybe_wait else {
+                    return;
+                };
+                if next_state == ForwardState::Error {
+                    let mut locked = state.lock().await;
+                    if let Some(rs) = locked.get_mut(&rule_id) {
+                        rs.error = Some(error.to_string());
+                    }
+                    return;
+                }
+                eprintln!("forward {rule_id}: connect failed ({error}), retry in {wait}s");
+                if !sleep_or_stop(&state, &rule_id, wait).await {
+                    return;
+                }
+                continue;
+            }
+        };
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        {
+            let mut locked = state.lock().await;
+            if let Some(rs) = locked.get_mut(&rule_id) {
+                if rs.state == ForwardState::Stopped {
+                    return;
+                }
+                rs.on_connect_success(cancel.clone());
+            }
+        }
+
+        let forward_result = match &rule.kind {
+            ForwardKind::Local => match (rule.remote_host.clone(), rule.remote_port) {
+                (Some(remote_host), Some(remote_port)) => {
+                    forward::run_local_forward(
+                        handle,
+                        rule.local_port,
+                        remote_host,
+                        remote_port,
+                        cancel,
+                    )
+                    .await
+                }
+                _ => Err(anyhow::anyhow!(
+                    "local forward '{}' is missing remote host or remote port",
+                    rule.name
+                )),
+            },
+            ForwardKind::Dynamic => {
+                forward::run_dynamic_forward(handle, rule.local_port, cancel).await
+            }
+            ForwardKind::Remote => match (rule.remote_host.clone(), rule.remote_port, forwarded_rx)
+            {
+                (Some(remote_host), Some(remote_port), Some(forwarded_rx)) => {
+                    forward::run_remote_forward_with_receiver(
+                        handle,
+                        forwarded_rx,
+                        remote_host,
+                        remote_port,
+                        rule.local_port,
+                        cancel,
+                    )
+                    .await
+                }
+                _ => Err(anyhow::anyhow!(
+                    "remote forward '{}' is missing remote port",
+                    rule.name
+                )),
+            },
+        };
+
+        if let Err(ref error) = forward_result {
+            eprintln!("forward {rule_id} error: {error}");
+        }
+        if let Err(ref error) = forward_result
+            && is_fatal_error(error)
+        {
+            let mut locked = state.lock().await;
+            if let Some(rs) = locked.get_mut(&rule_id) {
+                rs.on_fatal_error(error.to_string());
+            }
+            return;
+        }
+
+        {
+            let locked = state.lock().await;
+            if locked
+                .get(&rule_id)
+                .map(|rs| rs.state == ForwardState::Stopped)
+                .unwrap_or(false)
+            {
+                return;
+            }
+        }
+
+        let maybe_wait = {
+            let mut locked = state.lock().await;
+            locked.get_mut(&rule_id).map(|rs| {
+                rs.on_disconnect();
+                if let Some(err) = &forward_result.as_ref().err() {
+                    rs.error = Some(err.to_string());
+                }
+                let retry = rs.retry_count as usize;
+                (
+                    rs.state.clone(),
+                    backoff_secs
+                        .get(retry.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(30),
+                )
+            })
+        };
+        let Some((next_state, wait)) = maybe_wait else {
+            return;
+        };
+        if next_state == ForwardState::Error {
+            return;
+        }
+
+        eprintln!("forward {rule_id}: disconnected, retry in {wait}s");
+        if !sleep_or_stop(&state, &rule_id, wait).await {
+            return;
+        }
+    }
+}
+
+fn is_fatal_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    text.contains("all authentication methods failed")
+        || text.contains("authentication failed")
+        || text.contains("proxy jump host")
+        || text.contains("missing remote")
+        || text.contains("already in use")
 }
 
 #[cfg(test)]
@@ -417,10 +700,11 @@ mod tests {
                 retry_count: 0,
                 error: None,
                 cancel: None,
+                stopped: false,
             },
         )])));
 
-        let response = handle_request(IpcRequest::Status, &state, &hosts).await;
+        let response = handle_request_with_hosts(IpcRequest::Status, &state, &hosts).await;
 
         let IpcResponse::Status(statuses) = response else {
             panic!("expected status response");
@@ -438,7 +722,7 @@ mod tests {
         let hosts = vec![sample_host_with_forwards()];
         let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
 
-        let response = handle_request(
+        let response = handle_request_with_hosts(
             IpcRequest::Start {
                 forward_id: "fwd-1".into(),
             },
@@ -457,11 +741,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_rule_for_start_sets_known_rule_to_connecting() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::from([(
+            "fwd-1".into(),
+            RuleState::new(),
+        )])));
+
+        assert!(prepare_rule_for_start(&state, "fwd-1").await);
+
+        let locked = state.lock().await;
+        let rule = locked.get("fwd-1").unwrap();
+        assert_eq!(rule.state, ForwardState::Connecting);
+        assert_eq!(rule.retry_count, 0);
+        assert!(!rule.stopped);
+    }
+
+    #[tokio::test]
     async fn handle_request_start_returns_error_for_unknown_rule() {
         let hosts = vec![sample_host_with_forwards()];
         let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
 
-        let response = handle_request(
+        let response = handle_request_with_hosts(
             IpcRequest::Start {
                 forward_id: "missing".into(),
             },
@@ -488,6 +788,7 @@ mod tests {
                     retry_count: 2,
                     error: Some("boom".into()),
                     cancel: None,
+                    stopped: false,
                 },
             ),
             (
@@ -497,11 +798,12 @@ mod tests {
                     retry_count: 1,
                     error: None,
                     cancel: None,
+                    stopped: false,
                 },
             ),
         ])));
 
-        let response = handle_request(
+        let response = handle_request_with_hosts(
             IpcRequest::Stop {
                 forward_id: "fwd-1".into(),
             },
@@ -530,6 +832,7 @@ mod tests {
                     retry_count: 2,
                     error: Some("boom".into()),
                     cancel: None,
+                    stopped: false,
                 },
             ),
             (
@@ -539,11 +842,12 @@ mod tests {
                     retry_count: 1,
                     error: None,
                     cancel: None,
+                    stopped: false,
                 },
             ),
         ])));
 
-        let response = handle_request(IpcRequest::StopAll, &state, &hosts).await;
+        let response = handle_request_with_hosts(IpcRequest::StopAll, &state, &hosts).await;
         assert!(matches!(response, IpcResponse::Ok));
 
         let locked = state.lock().await;
@@ -552,5 +856,69 @@ mod tests {
             assert_eq!(rule.retry_count, 0);
             assert!(rule.error.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn sync_state_with_hosts_adds_new_rules_and_removes_deleted_rules() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::from([(
+            "deleted-rule".into(),
+            RuleState {
+                state: ForwardState::Running,
+                retry_count: 1,
+                error: None,
+                cancel: None,
+                stopped: false,
+            },
+        )])));
+        let hosts = vec![sample_host_with_forwards()];
+
+        sync_state_with_hosts(&state, &hosts).await;
+
+        let locked = state.lock().await;
+        assert!(locked.contains_key("fwd-1"));
+        assert!(locked.contains_key("fwd-2"));
+        assert!(!locked.contains_key("deleted-rule"));
+    }
+
+    #[tokio::test]
+    async fn sleep_or_stop_returns_false_when_rule_is_stopped() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::from([(
+            "fwd-1".into(),
+            RuleState {
+                state: ForwardState::Reconnecting,
+                retry_count: 1,
+                error: None,
+                cancel: None,
+                stopped: false,
+            },
+        )])));
+
+        let state_for_stop = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let mut locked = state_for_stop.lock().await;
+            locked.get_mut("fwd-1").unwrap().stop();
+        });
+
+        assert!(!sleep_or_stop(&state, "fwd-1", 1).await);
+    }
+
+    #[test]
+    fn fatal_error_detection_matches_expected_cases() {
+        assert!(is_fatal_error(&anyhow::anyhow!(
+            "all authentication methods failed for prod"
+        )));
+        assert!(is_fatal_error(&anyhow::anyhow!(
+            "proxy jump: authentication failed for bastion"
+        )));
+        assert!(is_fatal_error(&anyhow::anyhow!(
+            "proxy jump host 'bastion' not found"
+        )));
+        assert!(is_fatal_error(&anyhow::anyhow!(
+            "port 8080 already in use: bind failed"
+        )));
+        assert!(!is_fatal_error(&anyhow::anyhow!(
+            "connection reset by peer"
+        )));
     }
 }
