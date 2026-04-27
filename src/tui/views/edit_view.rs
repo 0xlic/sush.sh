@@ -66,6 +66,7 @@ pub struct EditDraft {
     pub tags: TagEditorState,
     pub focused_field: EditField,
     pub error: Option<String>,
+    original_forwards: Vec<crate::config::host::ForwardRule>,
 }
 
 #[allow(dead_code)]
@@ -84,6 +85,7 @@ impl EditDraft {
             tags: TagEditorState::new(vec![]),
             focused_field: EditField::Alias,
             error: None,
+            original_forwards: vec![],
         }
     }
 
@@ -105,6 +107,7 @@ impl EditDraft {
             tags: TagEditorState::new(host.tags.clone()),
             focused_field: EditField::Alias,
             error: None,
+            original_forwards: host.forwards.clone(),
         }
     }
 
@@ -173,7 +176,7 @@ pub fn build_host(draft: &mut EditDraft) -> Host {
         tags: draft.tags.tags.clone(),
         description: draft.description.trim().to_string(),
         source: HostSource::Manual,
-        forwards: vec![],
+        forwards: draft.original_forwards.clone(),
     }
 }
 
