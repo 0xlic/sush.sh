@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_RETRIES: u32 = 5;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IpcRequest {
@@ -47,7 +49,7 @@ impl ForwardState {
             Self::Stopped => "[stopped]".into(),
             Self::Connecting => "[connecting]".into(),
             Self::Running => "[running]".into(),
-            Self::Reconnecting => format!("[reconnecting {retry_count}/5]"),
+            Self::Reconnecting => format!("[reconnecting {retry_count}/{}]", MAX_RETRIES),
             Self::Error => "[error]".into(),
         }
     }
