@@ -86,6 +86,7 @@ mod tests {
             tags: tags.iter().map(|s| s.to_string()).collect(),
             description: String::new(),
             source: HostSource::Manual,
+            forwards: vec![],
         }
     }
 

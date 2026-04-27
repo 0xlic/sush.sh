@@ -173,6 +173,7 @@ pub fn build_host(draft: &mut EditDraft) -> Host {
         tags: draft.tags.tags.clone(),
         description: draft.description.trim().to_string(),
         source: HostSource::Manual,
+        forwards: vec![],
     }
 }
 
@@ -379,6 +380,7 @@ mod tests {
             tags: vec!["prod".into()],
             description: "test".into(),
             source: HostSource::Manual,
+            forwards: vec![],
         };
         let d = EditDraft::from_host(&h);
         assert_eq!(d.alias, "web");

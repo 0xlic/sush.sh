@@ -151,6 +151,7 @@ mod tests {
             tags: vec![],
             description: String::new(),
             source,
+            forwards: vec![],
         }
     }
 

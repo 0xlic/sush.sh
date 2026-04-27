@@ -3487,6 +3487,7 @@ mod tests {
             tags: vec![],
             description: String::new(),
             source: HostSource::Manual,
+            forwards: vec![],
         }
     }
 

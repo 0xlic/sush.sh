@@ -151,6 +151,7 @@ mod tests {
             tags: vec![],
             description: desc.into(),
             source: HostSource::SshConfig,
+            forwards: vec![],
         }
     }
 

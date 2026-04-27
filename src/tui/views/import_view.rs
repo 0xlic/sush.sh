@@ -150,6 +150,7 @@ mod tests {
             tags: vec![],
             description: String::new(),
             source: HostSource::SshConfig,
+            forwards: vec![],
         }
     }
 

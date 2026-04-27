@@ -64,6 +64,7 @@ fn host_from_entry(entry: &ssh2_config::Host) -> Option<Host> {
         tags: Vec::new(),
         description: String::new(),
         source: HostSource::SshConfig,
+        forwards: Vec::new(),
     })
 }
 
