@@ -22,11 +22,10 @@
 
 修改架构或新增模块前，必须先阅读对应文档：
 
-- `REQUIREMENTS.md` — 功能需求与交互规则
 - `ARCHITECTURE.md` — 技术栈、模块设计、数据流
 - `ROADMAP.md` — 版本规划
-
-每个新版本验收无误之后，需要更新上述文档及中英文README文档，以及打上git tag版本号
+- `/requirements/vX.Y.md` — 功能需求与交互规则,在 `docs/requirements` 目录下，ROADMAP中每个版本对应一个文件
+- `superpowers.md` — superpowers工作量的开发过程文档，可随时删除，不作为事实依据，功能调整后无需更新
 
 ## 版本发布规范
 
@@ -37,7 +36,7 @@
 
 ### 发布流程（按顺序执行）
 1. 更新 `Cargo.toml` 的 `version` 字段
-2. 更新 `REQUIREMENTS.md`、`ARCHITECTURE.md`、`ROADMAP.md` 及中英文 README
+2. 更新 `/requirements/vX.Y.md`、`ARCHITECTURE.md`、`ROADMAP.md` 及中英文 README
 3. 提交：`git commit -m "chore(release): bump version to vX.Y.Z"`
 4. 打 tag：`git tag vX.Y.Z`
 5. 推送：`git push origin main && git push origin vX.Y.Z`
