@@ -28,6 +28,27 @@
 
 每个新版本验收无误之后，需要更新上述文档及中英文README文档，以及打上git tag版本号
 
+## 版本发布规范
+
+### 版本号
+- 遵循 SemVer：`MAJOR.MINOR.PATCH`
+- `Cargo.toml` 的 `version` 字段是唯一版本来源，tag 必须与其一致
+- tag 格式：`v{MAJOR}.{MINOR}.{PATCH}`，例如 `v0.2.0`
+
+### 发布流程（按顺序执行）
+1. 更新 `Cargo.toml` 的 `version` 字段
+2. 更新 `REQUIREMENTS.md`、`ARCHITECTURE.md`、`ROADMAP.md` 及中英文 README
+3. 提交：`git commit -m "chore(release): bump version to vX.Y.Z"`
+4. 打 tag：`git tag vX.Y.Z`
+5. 推送：`git push origin main && git push origin vX.Y.Z`
+6. GitHub Actions 自动构建六个平台的二进制包并创建 Release
+
+### 规则
+- **必须先更新 `Cargo.toml` 版本再打 tag**，顺序不能颠倒
+- tag 与 Cargo.toml version 必须完全匹配（`v0.2.0` ↔ `"0.2.0"`）
+- 预发布后缀：`v0.2.0-beta.1`、`v0.2.0-rc.1`（Release 自动标记为 prerelease）
+- 发布平台：macOS arm64/x86-64，Linux arm64/x86-64，Windows x86/x86-64
+
 ## 代码规范
 
 ### Rust 风格
@@ -35,7 +56,7 @@
 - 优先函数式写法（迭代器链、map/filter/collect），避免不必要的 mut
 - 错误传播用 `?` + anyhow，不要 `unwrap()`/`expect()` 除非在 100% 安全的上下文
 - 类型定义加 `#[derive(Debug, Clone)]`，需要序列化的加 `Serialize, Deserialize`
-- 公共 API 加 `pub`，内部实现不���露
+- 公共 API 加 `pub`，内部实现不暴露
 - 每个模块的 `mod.rs` 只做 re-export，不放业务逻辑
 
 ### 不要做的事
