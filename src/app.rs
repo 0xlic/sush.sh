@@ -454,6 +454,8 @@ pub struct App {
     pub forward_edit: Option<crate::tui::views::forward_edit::ForwardEditState>,
     secret_store: SecretStore,
     pwd_dialog: Option<PwdDialog>,
+    #[cfg(test)]
+    test_config_dir: Option<tempfile::TempDir>,
 }
 
 impl App {
@@ -527,6 +529,8 @@ impl App {
             forward_edit: None,
             secret_store: SecretStore::new(Box::new(SystemSecretBackend::new())),
             pwd_dialog: None,
+            #[cfg(test)]
+            test_config_dir: None,
         })
     }
 
@@ -1827,8 +1831,16 @@ impl App {
     fn save_hosts_to_disk(&self) {
         let mut metadata = self.metadata.clone();
         metadata.import_prompted = self.import_prompted;
+        #[cfg(test)]
+        let config_path = self
+            .test_config_dir
+            .as_ref()
+            .map(|dir| dir.path().join("hosts.toml"))
+            .unwrap_or_else(store::config_path);
+        #[cfg(not(test))]
+        let config_path = store::config_path();
         let _ = store::save_store(
-            &store::config_path(),
+            &config_path,
             &store::HostStore {
                 metadata,
                 hosts: self.hosts.clone(),
@@ -3700,6 +3712,7 @@ mod tests {
     use crate::config::store::{Metadata, SecretSaveFailure};
 
     fn app_with(hosts: Vec<Host>) -> App {
+        let test_config_dir = tempfile::TempDir::new().unwrap();
         App {
             mode: AppMode::Main,
             hosts,
@@ -3758,6 +3771,7 @@ mod tests {
             forward_edit: None,
             secret_store: SecretStore::new(Box::new(FakeBackend::available())),
             pwd_dialog: None,
+            test_config_dir: Some(test_config_dir),
         }
     }
 
