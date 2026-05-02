@@ -16,7 +16,7 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
 
 # SSH + SFTP
-russh = "0.60"
+russh = { version = "0.60", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "2.1"
 alacritty_terminal = "0.26"
 
