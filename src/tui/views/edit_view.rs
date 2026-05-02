@@ -62,6 +62,8 @@ pub struct EditDraft {
     pub user: String,
     pub identity: String,
     pub proxy_jump: String,
+    pub proxy_jump_candidate_sel: usize,
+    pub proxy_jump_candidates_open: bool,
     pub description: String,
     pub tags: TagEditorState,
     pub focused_field: EditField,
@@ -81,6 +83,8 @@ impl EditDraft {
             user: String::new(),
             identity: String::new(),
             proxy_jump: String::new(),
+            proxy_jump_candidate_sel: 0,
+            proxy_jump_candidates_open: false,
             description: String::new(),
             tags: TagEditorState::new(vec![]),
             focused_field: EditField::Alias,
@@ -103,6 +107,8 @@ impl EditDraft {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
             proxy_jump: host.proxy_jump.clone().unwrap_or_default(),
+            proxy_jump_candidate_sel: 0,
+            proxy_jump_candidates_open: false,
             description: host.description.clone(),
             tags: TagEditorState::new(host.tags.clone()),
             focused_field: EditField::Alias,
@@ -181,7 +187,12 @@ pub fn build_host(draft: &mut EditDraft) -> Host {
 }
 
 #[allow(dead_code)]
-pub fn render(f: &mut Frame, draft: &EditDraft, all_tags: &[String]) {
+pub fn render(
+    f: &mut Frame,
+    draft: &EditDraft,
+    all_tags: &[String],
+    proxy_jump_aliases: &[String],
+) {
     let [form_area, status_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
 
@@ -212,6 +223,7 @@ pub fn render(f: &mut Frame, draft: &EditDraft, all_tags: &[String]) {
         ("Tags       ", EditField::Tags),
         ("Description", EditField::Description),
     ];
+    let proxy_jump_candidates = proxy_jump_candidates(draft, proxy_jump_aliases);
 
     for (i, (label, field)) in field_defs.iter().enumerate() {
         let row_area = cells[i * 2];
@@ -256,6 +268,18 @@ pub fn render(f: &mut Frame, draft: &EditDraft, all_tags: &[String]) {
                 value.to_string()
             };
             f.render_widget(Paragraph::new(display), value_area);
+            if *field == EditField::ProxyJump
+                && focused
+                && draft.proxy_jump_candidates_open
+                && !proxy_jump_candidates.is_empty()
+            {
+                render_candidates(
+                    f,
+                    value_area,
+                    &proxy_jump_candidates,
+                    proxy_jump_selection(draft, &proxy_jump_candidates),
+                );
+            }
         }
     }
 
@@ -269,13 +293,26 @@ pub fn render(f: &mut Frame, draft: &EditDraft, all_tags: &[String]) {
 
     let _ = all_tags;
 
+    let hints = if draft.focused_field == EditField::ProxyJump {
+        &[
+            ("Ctrl-S", "Save"),
+            ("ESC", "Cancel"),
+            ("Tab", "Next field"),
+            ("↑↓", "Pick hint"),
+            ("Enter", "Apply hint"),
+            ("Backspace", "Clear"),
+        ][..]
+    } else {
+        &[
+            ("Ctrl-S", "Save"),
+            ("ESC", "Cancel"),
+            ("Tab/↑↓", "Next field"),
+        ][..]
+    };
+
     f.render_widget(
         StatusBar {
-            hints: &[
-                ("Ctrl-S", "Save"),
-                ("ESC", "Cancel"),
-                ("Tab/↑↓", "Next field"),
-            ],
+            hints,
             transfer_badge: None,
         },
         status_area,
@@ -328,6 +365,31 @@ fn render_candidates(f: &mut Frame, anchor: Rect, candidates: &[String], sel: us
         popup,
         &mut list_state,
     );
+}
+
+fn proxy_jump_selection(draft: &EditDraft, candidates: &[String]) -> usize {
+    if candidates.is_empty() {
+        0
+    } else {
+        draft
+            .proxy_jump_candidate_sel
+            .min(candidates.len().saturating_sub(1))
+    }
+}
+
+pub fn proxy_jump_candidates(draft: &EditDraft, aliases: &[String]) -> Vec<String> {
+    let query = draft.proxy_jump.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    aliases
+        .iter()
+        .filter(|alias| alias.as_str() != draft.alias.trim())
+        .filter(|alias| alias.to_lowercase().contains(&query))
+        .take(5)
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -403,5 +465,40 @@ mod tests {
         assert_eq!(h.alias, "srv");
         assert_eq!(h.port, 2222);
         assert!(matches!(h.source, HostSource::Manual));
+    }
+
+    #[test]
+    fn proxy_jump_selection_prefers_matching_alias() {
+        let mut d = blank_draft();
+        d.proxy_jump_candidate_sel = 1;
+        let candidates = vec!["alpha".into(), "bastion".into(), "omega".into()];
+
+        assert_eq!(proxy_jump_selection(&d, &candidates), 1);
+    }
+
+    #[test]
+    fn proxy_jump_selection_defaults_to_first_candidate() {
+        let d = blank_draft();
+        let candidates = vec!["alpha".into(), "bastion".into()];
+
+        assert_eq!(proxy_jump_selection(&d, &candidates), 0);
+    }
+
+    #[test]
+    fn proxy_jump_candidates_filter_and_exclude_self() {
+        let mut d = blank_draft();
+        d.alias = "target".into();
+        d.proxy_jump = "ba".into();
+        let aliases = vec![
+            "bastion".into(),
+            "backup".into(),
+            "target".into(),
+            "db".into(),
+        ];
+
+        assert_eq!(
+            proxy_jump_candidates(&d, &aliases),
+            vec!["bastion", "backup"]
+        );
     }
 }

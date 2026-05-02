@@ -43,7 +43,7 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
         None
     };
 
-    let status_msg = app.status_msg.as_ref().map(|(s, _)| s.as_str());
+    let status_msg = app.main_status_message();
 
     let content_chunks = if app.show_folder_sidebar {
         Layout::default()

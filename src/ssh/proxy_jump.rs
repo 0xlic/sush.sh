@@ -43,6 +43,26 @@ pub async fn connect_via_proxy_jump_with_handler(
             )
         })?;
 
+    let mut target_handle =
+        connect_via_authenticated_bastion(&mut bastion_handle, target, handler).await?;
+
+    auth::authenticate(&mut target_handle, target)
+        .await
+        .with_context(|| {
+            format!(
+                "proxy jump: authentication failed for target {}",
+                target.alias
+            )
+        })?;
+
+    Ok(target_handle)
+}
+
+pub async fn connect_via_authenticated_bastion(
+    bastion_handle: &mut Handle<ClientHandler>,
+    target: &Host,
+    handler: ClientHandler,
+) -> Result<Handle<ClientHandler>> {
     let channel = bastion_handle
         .channel_open_direct_tcpip(&target.hostname, target.port as u32, "127.0.0.1", 0)
         .await
@@ -55,23 +75,12 @@ pub async fn connect_via_proxy_jump_with_handler(
 
     let channel_stream = channel.into_stream();
     let target_config = Arc::new(client::Config::default());
-    let mut target_handle = client::connect_stream(target_config, channel_stream, handler)
+    client::connect_stream(target_config, channel_stream, handler)
         .await
         .with_context(|| {
             format!(
                 "proxy jump: SSH handshake failed with target {}",
                 target.hostname
             )
-        })?;
-
-    auth::authenticate(&mut target_handle, target)
-        .await
-        .with_context(|| {
-            format!(
-                "proxy jump: authentication failed for target {}",
-                target.alias
-            )
-        })?;
-
-    Ok(target_handle)
+        })
 }

@@ -25,7 +25,8 @@ use crate::sftp::transfer::{
 };
 use crate::sftp::{PaneSide, SftpPaneState};
 use crate::ssh::auth;
-use crate::ssh::session::{ActiveSession, try_key_auth};
+use crate::ssh::proxy_jump;
+use crate::ssh::session::{ActiveSession, ClientHandler, try_key_auth};
 use crate::ssh::terminal::TerminalEmulator;
 use crate::tui::event::{AppEvent, EventBus};
 use crate::tui::views::edit_view::{self, EditDraft, EditField};
@@ -99,6 +100,26 @@ impl ForwardingViewState {
 struct PwdDialog {
     dialog: PasswordDialog,
     result: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingConnectionKind {
+    Ssh,
+    Sftp,
+}
+
+#[derive(Debug, Clone)]
+enum ConnectionRoute {
+    Direct(Host),
+    ViaProxyJump { bastion: Host, target: Host },
+}
+
+struct PendingConnection {
+    kind: PendingConnectionKind,
+    host: Host,
+    route: ConnectionRoute,
+    status: String,
+    rx: tokio::sync::oneshot::Receiver<Result<ActiveSession>>,
 }
 
 enum LoopEvent {
@@ -447,6 +468,7 @@ pub struct App {
     pub probe_rx: Option<tokio::sync::oneshot::Receiver<bool>>,
     pub probe_result: Option<bool>,
     pub status_msg: Option<(String, Instant)>,
+    pending_connection: Option<PendingConnection>,
     pub show_import_prompt: bool,
     pub folder_view_state: Option<FolderViewState>,
     pub folder_host_indices: Vec<usize>,
@@ -522,6 +544,7 @@ impl App {
             probe_rx: None,
             probe_result: None,
             status_msg: None,
+            pending_connection: None,
             show_import_prompt: false,
             folder_view_state: None,
             folder_host_indices: vec![],
@@ -604,6 +627,8 @@ impl App {
         let mut bus = EventBus::new();
 
         while !self.should_quit {
+            self.poll_pending_connection(terminal, &mut bus).await?;
+
             // Trigger SSH connection.
             if self.trigger_connect {
                 self.trigger_connect = false;
@@ -612,12 +637,20 @@ impl App {
                     .get(self.list_state.selected().unwrap_or(0))
                 {
                     let host = self.hosts[idx].clone();
-                    if let Err(e) = self
-                        .ssh_connect_and_takeover(terminal, &mut bus, &host)
-                        .await
-                    {
-                        self.connection_history.record(&host.alias);
-                        self.set_status(format!("Connection failed: {e}"));
+                    if self.pending_connection.is_none() {
+                        if let Err(e) =
+                            self.start_pending_connection(PendingConnectionKind::Ssh, host)
+                        {
+                            self.connection_history.record(
+                                &self.hosts[self
+                                    .filtered_indices
+                                    .get(self.list_state.selected().unwrap_or(0))
+                                    .copied()
+                                    .unwrap_or(idx)]
+                                .alias,
+                            );
+                            self.set_status(format!("Connection failed: {e}"));
+                        }
                     }
                 }
             }
@@ -630,9 +663,20 @@ impl App {
                     .get(self.list_state.selected().unwrap_or(0))
                 {
                     let host = self.hosts[idx].clone();
-                    if let Err(e) = self.sftp_connect(terminal, &mut bus, &host).await {
-                        self.connection_history.record(&host.alias);
-                        self.set_status(format!("SFTP failed: {e}"));
+                    if self.pending_connection.is_none() {
+                        if let Err(e) =
+                            self.start_pending_connection(PendingConnectionKind::Sftp, host)
+                        {
+                            self.connection_history.record(
+                                &self.hosts[self
+                                    .filtered_indices
+                                    .get(self.list_state.selected().unwrap_or(0))
+                                    .copied()
+                                    .unwrap_or(idx)]
+                                .alias,
+                            );
+                            self.set_status(format!("SFTP failed: {e}"));
+                        }
                     }
                 }
             }
@@ -1323,6 +1367,168 @@ impl App {
         self.status_msg = Some((msg, Instant::now()));
     }
 
+    pub fn main_status_message(&self) -> Option<&str> {
+        self.pending_connection
+            .as_ref()
+            .map(|pending| pending.status.as_str())
+            .or_else(|| self.status_msg.as_ref().map(|(msg, _)| msg.as_str()))
+    }
+
+    fn start_pending_connection(&mut self, kind: PendingConnectionKind, host: Host) -> Result<()> {
+        let route = self.resolve_connection_route(&host)?;
+        let connect_host = match &route {
+            ConnectionRoute::Direct(target) => target.clone(),
+            ConnectionRoute::ViaProxyJump { bastion, .. } => bastion.clone(),
+        };
+        let status = match (&kind, &route) {
+            (PendingConnectionKind::Ssh, ConnectionRoute::Direct(target)) => {
+                format!("Connecting to {}:{}...", target.hostname, target.port)
+            }
+            (PendingConnectionKind::Sftp, ConnectionRoute::Direct(target)) => {
+                format!(
+                    "Connecting to {}:{} for SFTP...",
+                    target.hostname, target.port
+                )
+            }
+            (PendingConnectionKind::Ssh, ConnectionRoute::ViaProxyJump { bastion, target }) => {
+                format!(
+                    "Connecting to {}:{} via {}...",
+                    target.hostname, target.port, bastion.alias
+                )
+            }
+            (PendingConnectionKind::Sftp, ConnectionRoute::ViaProxyJump { bastion, target }) => {
+                format!(
+                    "Connecting to {}:{} for SFTP via {}...",
+                    target.hostname, target.port, bastion.alias
+                )
+            }
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = ActiveSession::connect(&connect_host.hostname, connect_host.port).await;
+            let _ = tx.send(result);
+        });
+        self.pending_connection = Some(PendingConnection {
+            kind,
+            host,
+            route,
+            status,
+            rx,
+        });
+        Ok(())
+    }
+
+    fn resolve_connection_route(&self, host: &Host) -> Result<ConnectionRoute> {
+        match host.proxy_jump.as_deref() {
+            Some(jump_alias) => {
+                let bastion = self
+                    .hosts
+                    .iter()
+                    .find(|candidate| candidate.alias == jump_alias)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("proxy jump host '{jump_alias}' not found"))?;
+                Ok(ConnectionRoute::ViaProxyJump {
+                    bastion,
+                    target: host.clone(),
+                })
+            }
+            None => Ok(ConnectionRoute::Direct(host.clone())),
+        }
+    }
+
+    async fn poll_pending_connection(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        bus: &mut EventBus,
+    ) -> Result<()> {
+        let Some(mut pending) = self.pending_connection.take() else {
+            return Ok(());
+        };
+
+        match pending.rx.try_recv() {
+            Ok(connect_result) => {
+                let host = pending.host;
+                let finish_result = match connect_result {
+                    Ok(session) => {
+                        self.finish_pending_connection(
+                            terminal,
+                            bus,
+                            pending.kind,
+                            &host,
+                            pending.route,
+                            session,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+
+                if let Err(error) = finish_result {
+                    self.connection_history.record(&host.alias);
+                    let prefix = match pending.kind {
+                        PendingConnectionKind::Ssh => "Connection failed",
+                        PendingConnectionKind::Sftp => "SFTP failed",
+                    };
+                    self.set_status(format!("{prefix}: {error}"));
+                }
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                self.pending_connection = Some(pending);
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.set_status("Connection failed: background task closed unexpectedly".into());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn finish_pending_connection(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        bus: &mut EventBus,
+        kind: PendingConnectionKind,
+        host: &Host,
+        route: ConnectionRoute,
+        session: ActiveSession,
+    ) -> Result<()> {
+        match route {
+            ConnectionRoute::Direct(_) => match kind {
+                PendingConnectionKind::Ssh => {
+                    self.finish_ssh_connect(terminal, bus, host, session).await
+                }
+                PendingConnectionKind::Sftp => {
+                    self.finish_sftp_connect(terminal, bus, host, session).await
+                }
+            },
+            ConnectionRoute::ViaProxyJump { bastion, target } => {
+                let mut bastion_session = self
+                    .authenticate_connected_session(terminal, bus, &bastion, session)
+                    .await?;
+                let target_handle = proxy_jump::connect_via_authenticated_bastion(
+                    &mut bastion_session.handle,
+                    &target,
+                    ClientHandler::default(),
+                )
+                .await?;
+                let target_session = ActiveSession {
+                    handle: target_handle,
+                    channel: None,
+                };
+                match kind {
+                    PendingConnectionKind::Ssh => {
+                        self.finish_ssh_connect(terminal, bus, &target, target_session)
+                            .await
+                    }
+                    PendingConnectionKind::Sftp => {
+                        self.finish_sftp_connect(terminal, bus, &target, target_session)
+                            .await
+                    }
+                }
+            }
+        }
+    }
+
     fn normalize_queue_counters(&mut self) {
         if self.active_transfer.is_none()
             && self.active_recursive_transfer.is_none()
@@ -1901,12 +2107,30 @@ impl App {
     }
 
     fn handle_edit_input(&mut self, k: KeyEvent) {
-        let Some(draft) = self.edit_draft.as_mut() else {
+        let Some(focused_field) = self.edit_draft.as_ref().map(|draft| draft.focused_field) else {
             return;
+        };
+        let proxy_jump_candidates = if focused_field == EditField::ProxyJump {
+            let proxy_jump_aliases: Vec<String> =
+                self.hosts.iter().map(|host| host.alias.clone()).collect();
+            self.edit_draft
+                .as_ref()
+                .map(|draft| edit_view::proxy_jump_candidates(draft, &proxy_jump_aliases))
+                .unwrap_or_default()
+        } else {
+            vec![]
         };
 
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) => {
+                if focused_field == EditField::ProxyJump {
+                    let draft = self.edit_draft.as_mut().unwrap();
+                    if draft.proxy_jump_candidates_open && !proxy_jump_candidates.is_empty() {
+                        draft.proxy_jump_candidates_open = false;
+                        draft.proxy_jump_candidate_sel = 0;
+                        return;
+                    }
+                }
                 self.edit_draft = None;
                 self.mode = AppMode::Main;
                 self.on_selection_changed();
@@ -1917,6 +2141,7 @@ impl App {
                 return;
             }
             (KeyCode::Tab, _) | (KeyCode::Down, _) => {
+                let draft = self.edit_draft.as_mut().unwrap();
                 if draft.focused_field == EditField::Tags {
                     if !draft.tags.candidates.is_empty() {
                         draft.tags.handle_down();
@@ -1924,10 +2149,12 @@ impl App {
                     }
                     draft.tags.commit_pending();
                 }
+                draft.proxy_jump_candidates_open = false;
                 draft.focused_field = draft.focused_field.next();
                 return;
             }
             (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
+                let draft = self.edit_draft.as_mut().unwrap();
                 if draft.focused_field == EditField::Tags {
                     if !draft.tags.candidates.is_empty() {
                         draft.tags.handle_up();
@@ -1935,11 +2162,57 @@ impl App {
                     }
                     draft.tags.commit_pending();
                 }
+                draft.proxy_jump_candidates_open = false;
                 draft.focused_field = draft.focused_field.prev();
                 return;
             }
             _ => {}
         }
+
+        if focused_field == EditField::ProxyJump {
+            let draft = self.edit_draft.as_mut().unwrap();
+
+            match (k.code, k.modifiers) {
+                (KeyCode::Down, _) if !proxy_jump_candidates.is_empty() => {
+                    draft.proxy_jump_candidates_open = true;
+                    draft.proxy_jump_candidate_sel =
+                        (draft.proxy_jump_candidate_sel + 1).min(proxy_jump_candidates.len() - 1);
+                    return;
+                }
+                (KeyCode::Up, _) if !proxy_jump_candidates.is_empty() => {
+                    draft.proxy_jump_candidates_open = true;
+                    draft.proxy_jump_candidate_sel =
+                        draft.proxy_jump_candidate_sel.saturating_sub(1);
+                    return;
+                }
+                (KeyCode::Enter, _) if !proxy_jump_candidates.is_empty() => {
+                    if let Some(candidate) =
+                        proxy_jump_candidates.get(draft.proxy_jump_candidate_sel)
+                    {
+                        draft.proxy_jump = candidate.clone();
+                        draft.proxy_jump_candidate_sel = 0;
+                        draft.proxy_jump_candidates_open = false;
+                    }
+                    return;
+                }
+                (KeyCode::Backspace, _) => {
+                    draft.proxy_jump.pop();
+                    draft.proxy_jump_candidate_sel = 0;
+                    draft.proxy_jump_candidates_open = !draft.proxy_jump.is_empty();
+                    return;
+                }
+                (KeyCode::Char(c), KeyModifiers::NONE)
+                | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                    draft.proxy_jump.push(c);
+                    draft.proxy_jump_candidate_sel = 0;
+                    draft.proxy_jump_candidates_open = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let draft = self.edit_draft.as_mut().unwrap();
 
         if draft.focused_field == EditField::Tags {
             let all_tags: Vec<String> = {
@@ -2009,6 +2282,17 @@ impl App {
                 draft.error = Some(e);
             }
             Ok(()) => {
+                let proxy_jump = draft.proxy_jump.trim();
+                if !proxy_jump.is_empty() {
+                    if proxy_jump == draft.alias.trim() {
+                        draft.error = Some("Proxy Jump cannot reference the current host".into());
+                        return;
+                    }
+                    if !self.hosts.iter().any(|host| host.alias == proxy_jump) {
+                        draft.error = Some("Proxy Jump must match an existing host alias".into());
+                        return;
+                    }
+                }
                 let host = edit_view::build_host(draft);
                 if draft.is_new {
                     self.hosts.push(host);
@@ -2556,13 +2840,16 @@ impl App {
         self.on_selection_changed();
     }
 
-    async fn sftp_connect(
+    async fn finish_sftp_connect(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
         bus: &mut EventBus,
         host: &Host,
+        session: ActiveSession,
     ) -> Result<()> {
-        let session = self.connect_with_prompt(terminal, bus, host).await?;
+        let session = self
+            .authenticate_connected_session(terminal, bus, host, session)
+            .await?;
         let client = SftpClient::open(&session).await?;
         let home = client.home_dir().await;
         let remote_entries = client.list_dir(&home).await.unwrap_or_default();
@@ -3103,13 +3390,16 @@ impl App {
         Ok(())
     }
 
-    async fn ssh_connect_and_takeover(
+    async fn finish_ssh_connect(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
         bus: &mut EventBus,
         host: &Host,
+        session: ActiveSession,
     ) -> Result<()> {
-        let mut session = self.connect_with_prompt(terminal, bus, host).await?;
+        let mut session = self
+            .authenticate_connected_session(terminal, bus, host, session)
+            .await?;
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         // Reserve 1 row for the status bar.
         let term_rows = rows.saturating_sub(3).max(1);
@@ -3124,14 +3414,13 @@ impl App {
         Ok(())
     }
 
-    async fn connect_with_prompt(
+    async fn authenticate_connected_session(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
         bus: &mut EventBus,
         host: &Host,
+        mut session: ActiveSession,
     ) -> Result<ActiveSession> {
-        let mut session = ActiveSession::connect(&host.hostname, host.port).await?;
-
         if auth::try_agent_auth(&mut session.handle, &host.user)
             .await
             .unwrap_or(false)
@@ -3472,7 +3761,9 @@ impl App {
                         t.dedup();
                         t
                     };
-                    edit_view::render(f, draft, &all_tags);
+                    let proxy_jump_aliases: Vec<String> =
+                        self.hosts.iter().map(|host| host.alias.clone()).collect();
+                    edit_view::render(f, draft, &all_tags, &proxy_jump_aliases);
                 }
             }
             AppMode::ImportSshConfig => {
@@ -3764,6 +4055,7 @@ mod tests {
             probe_rx: None,
             probe_result: None,
             status_msg: None,
+            pending_connection: None,
             show_import_prompt: false,
             folder_view_state: None,
             folder_host_indices: vec![],
@@ -3803,6 +4095,50 @@ mod tests {
             source: HostSource::Manual,
             forwards: vec![],
         }
+    }
+
+    #[test]
+    fn resolve_connection_route_uses_direct_target_without_proxy_jump() {
+        let target = mk("ubuntu2");
+        let app = app_with(vec![target.clone()]);
+
+        match app.resolve_connection_route(&target).unwrap() {
+            ConnectionRoute::Direct(host) => assert_eq!(host.alias, "ubuntu2"),
+            ConnectionRoute::ViaProxyJump { .. } => panic!("expected direct route"),
+        }
+    }
+
+    #[test]
+    fn resolve_connection_route_uses_bastion_for_proxy_jump() {
+        let bastion = mk("ubuntu1");
+        let mut target = mk("ubuntu2");
+        target.proxy_jump = Some("ubuntu1".into());
+        let app = app_with(vec![bastion.clone(), target.clone()]);
+
+        match app.resolve_connection_route(&target).unwrap() {
+            ConnectionRoute::ViaProxyJump {
+                bastion: resolved_bastion,
+                target: resolved_target,
+            } => {
+                assert_eq!(resolved_bastion.alias, "ubuntu1");
+                assert_eq!(resolved_target.alias, "ubuntu2");
+            }
+            ConnectionRoute::Direct(_) => panic!("expected proxy jump route"),
+        }
+    }
+
+    #[test]
+    fn resolve_connection_route_rejects_missing_proxy_jump_host() {
+        let mut target = mk("ubuntu2");
+        target.proxy_jump = Some("missing".into());
+        let app = app_with(vec![target.clone()]);
+
+        let error = app
+            .resolve_connection_route(&target)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("proxy jump host 'missing' not found"));
     }
 
     fn app_with_sftp_pane(side: PaneSide, entries: Vec<crate::sftp::client::FileEntry>) -> App {
