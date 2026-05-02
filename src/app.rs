@@ -1801,7 +1801,42 @@ impl App {
     fn rebuild_forwarding_state(&mut self) {
         let mut next = ForwardingViewState::new(&self.hosts);
         if let Some(previous) = &self.forwarding_state {
+            let selected_host_id = previous
+                .selected_host_idx()
+                .and_then(|host_idx| self.hosts.get(host_idx))
+                .map(|host| host.id.clone());
+            let selected_rule_id = previous
+                .selected_host_idx()
+                .and_then(|host_idx| {
+                    previous
+                        .rule_list_state
+                        .selected()
+                        .map(|rule_idx| (host_idx, rule_idx))
+                })
+                .and_then(|(host_idx, rule_idx)| self.hosts.get(host_idx)?.forwards.get(rule_idx))
+                .map(|rule| rule.id.clone());
+
+            next.focus = previous.focus;
             next.statuses = previous.statuses.clone();
+
+            if let Some(host_id) = selected_host_id
+                && let Some(host_pos) = next
+                    .host_indices
+                    .iter()
+                    .position(|&host_idx| self.hosts[host_idx].id == host_id)
+            {
+                next.host_list_state.select(Some(host_pos));
+            }
+
+            if let Some(rule_id) = selected_rule_id
+                && let Some(host_idx) = next.selected_host_idx()
+                && let Some(rule_pos) = self.hosts[host_idx]
+                    .forwards
+                    .iter()
+                    .position(|rule| rule.id == rule_id)
+            {
+                next.rule_list_state.select(Some(rule_pos));
+            }
         }
         self.forwarding_state = Some(next);
     }
@@ -4277,6 +4312,38 @@ mod tests {
         let edit = app.forward_edit.as_ref().expect("forward edit should open");
         assert_eq!(edit.host_id, "web");
         assert_eq!(edit.host_alias, "web");
+    }
+
+    #[test]
+    fn saving_new_forward_keeps_selected_host() {
+        let mut app = app_with(vec![mk("a"), mk("b")]);
+
+        app.handle_main_key_hostlist(KeyEvent::from(KeyCode::Char('p')));
+        app.forwarding_state
+            .as_mut()
+            .expect("forwarding state should exist")
+            .host_list_state
+            .select(Some(1));
+
+        app.handle_forwarding_key(KeyEvent::from(KeyCode::Char('n')));
+
+        let edit = app
+            .forward_edit
+            .as_mut()
+            .expect("forward edit should open for selected host");
+        edit.name = "web".into();
+        edit.local_port = "8080".into();
+        edit.remote_host = "localhost".into();
+        edit.remote_port = "80".into();
+
+        app.handle_forward_edit_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let state = app
+            .forwarding_state
+            .as_ref()
+            .expect("forwarding state should still exist");
+        assert_eq!(state.selected_host_idx(), Some(1));
+        assert_eq!(app.hosts[1].forwards.len(), 1);
     }
 
     #[test]
