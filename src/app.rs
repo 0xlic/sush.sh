@@ -111,7 +111,10 @@ enum PendingConnectionKind {
 #[derive(Debug, Clone)]
 enum ConnectionRoute {
     Direct(Box<Host>),
-    ViaProxyJump { bastion: Box<Host>, target: Box<Host> },
+    ViaProxyJump {
+        bastion: Box<Host>,
+        target: Box<Host>,
+    },
 }
 
 struct PendingConnection {
