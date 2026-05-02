@@ -37,10 +37,18 @@
 ### 发布流程（按顺序执行）
 1. 更新 `Cargo.toml` 的 `version` 字段
 2. 更新 `/requirements/vX.Y.md`、`ARCHITECTURE.md`、`ROADMAP.md` 及中英文 README
-3. 提交：`git commit -m "chore(release): bump version to vX.Y.Z"`
-4. 打 tag：`git tag vX.Y.Z`
-5. 推送：`git push origin main && git push origin vX.Y.Z`
-6. GitHub Actions 自动构建六个平台的二进制包并创建 Release
+3. 生成 changelog（草稿，可手动润色后再提交）：
+   ```bash
+   git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md
+   ```
+4. 提交：
+   ```bash
+   git add Cargo.toml CHANGELOG.md
+   git commit -m "chore(release): bump version to vX.Y.Z"
+   ```
+5. 打 tag：`git tag vX.Y.Z`
+6. 推送：`git push origin main && git push origin vX.Y.Z`
+7. GitHub Actions 自动构建六个平台的二进制包，从 `CHANGELOG.md` 读取 Release body 并发布
 
 ### 规则
 - **必须先更新 `Cargo.toml` 版本再打 tag**，顺序不能颠倒
