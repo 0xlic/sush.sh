@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
@@ -11,7 +12,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::config::store;
-use crate::tunnel::ipc::{self, ForwardState, ForwardStatus, IpcRequest, IpcResponse, MAX_RETRIES};
+#[cfg(unix)]
+use crate::tunnel::ipc;
+use crate::tunnel::ipc::{ForwardState, ForwardStatus, IpcRequest, IpcResponse, MAX_RETRIES};
 
 fn daemon_sock_path() -> Result<std::path::PathBuf> {
     Ok(store::config_dir().join("daemon.sock"))
@@ -232,6 +235,7 @@ async fn handle_request(req: IpcRequest, state: &SharedState) -> IpcResponse {
     handle_request_with_hosts(req, state, &hosts).await
 }
 
+#[cfg(unix)]
 async fn handle_request_with_hosts(
     req: IpcRequest,
     state: &SharedState,

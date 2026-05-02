@@ -9,6 +9,7 @@ use crate::config::secrets::{SecretKey, SecretKind, SecretStore, SystemSecretBac
 use super::session::ClientHandler;
 use super::session::try_key_auth;
 
+#[cfg(unix)]
 pub async fn try_agent_auth(
     handle: &mut russh::client::Handle<ClientHandler>,
     user: &str,
@@ -46,6 +47,7 @@ pub async fn authenticate(
     handle: &mut russh::client::Handle<ClientHandler>,
     host: &Host,
 ) -> anyhow::Result<()> {
+    #[cfg(unix)]
     if try_agent_auth(handle, &host.user).await.unwrap_or(false) {
         return Ok(());
     }

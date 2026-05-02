@@ -1,7 +1,9 @@
 use anyhow::Result;
 
 use crate::config::store;
-use crate::tunnel::ipc::{ForwardStatus, IpcRequest, IpcResponse, encode_request};
+use crate::tunnel::ipc::ForwardStatus;
+#[cfg(unix)]
+use crate::tunnel::ipc::{IpcRequest, IpcResponse, encode_request};
 
 #[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
