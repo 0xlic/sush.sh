@@ -1,9 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use russh::client::{self, Handle, Msg};
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::{Channel, ChannelMsg, Disconnect};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
+
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ClientHandler {
     forwarded_tcpip_tx: Option<UnboundedSender<Channel<Msg>>>,
@@ -72,9 +75,13 @@ impl ActiveSession {
         handler: ClientHandler,
     ) -> Result<Self> {
         let config = Arc::new(client::Config::default());
-        let handle = client::connect(config, (hostname, port), handler)
-            .await
-            .with_context(|| format!("failed to connect to {hostname}:{port}"))?;
+        let handle = tokio::time::timeout(
+            SSH_CONNECT_TIMEOUT,
+            client::connect(config, (hostname, port), handler),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out connecting to {hostname}:{port}"))?
+        .with_context(|| format!("failed to connect to {hostname}:{port}"))?;
         Ok(Self {
             handle,
             channel: None,
