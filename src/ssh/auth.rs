@@ -1,5 +1,8 @@
+#[cfg(unix)]
 use anyhow::Result;
+#[cfg(unix)]
 use russh::keys::agent::AgentIdentity;
+#[cfg(unix)]
 use russh::keys::agent::client::AgentClient;
 use std::path::{Path, PathBuf};
 

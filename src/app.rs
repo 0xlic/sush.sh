@@ -3457,6 +3457,7 @@ impl App {
         host: &Host,
         mut session: ActiveSession,
     ) -> Result<ActiveSession> {
+        #[cfg(unix)]
         if auth::try_agent_auth(&mut session.handle, &host.user)
             .await
             .unwrap_or(false)

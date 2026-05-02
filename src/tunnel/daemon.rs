@@ -14,7 +14,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::config::store;
 #[cfg(unix)]
 use crate::tunnel::ipc;
-use crate::tunnel::ipc::{ForwardState, ForwardStatus, IpcRequest, IpcResponse, MAX_RETRIES};
+use crate::tunnel::ipc::{ForwardState, MAX_RETRIES};
+#[cfg(unix)]
+use crate::tunnel::ipc::{ForwardStatus, IpcRequest, IpcResponse};
 
 fn daemon_sock_path() -> Result<std::path::PathBuf> {
     Ok(store::config_dir().join("daemon.sock"))
