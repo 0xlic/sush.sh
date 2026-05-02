@@ -110,8 +110,8 @@ enum PendingConnectionKind {
 
 #[derive(Debug, Clone)]
 enum ConnectionRoute {
-    Direct(Host),
-    ViaProxyJump { bastion: Host, target: Host },
+    Direct(Box<Host>),
+    ViaProxyJump { bastion: Box<Host>, target: Box<Host> },
 }
 
 struct PendingConnection {
@@ -637,20 +637,19 @@ impl App {
                     .get(self.list_state.selected().unwrap_or(0))
                 {
                     let host = self.hosts[idx].clone();
-                    if self.pending_connection.is_none() {
-                        if let Err(e) =
+                    if self.pending_connection.is_none()
+                        && let Err(e) =
                             self.start_pending_connection(PendingConnectionKind::Ssh, host)
-                        {
-                            self.connection_history.record(
-                                &self.hosts[self
-                                    .filtered_indices
-                                    .get(self.list_state.selected().unwrap_or(0))
-                                    .copied()
-                                    .unwrap_or(idx)]
-                                .alias,
-                            );
-                            self.set_status(format!("Connection failed: {e}"));
-                        }
+                    {
+                        self.connection_history.record(
+                            &self.hosts[self
+                                .filtered_indices
+                                .get(self.list_state.selected().unwrap_or(0))
+                                .copied()
+                                .unwrap_or(idx)]
+                            .alias,
+                        );
+                        self.set_status(format!("Connection failed: {e}"));
                     }
                 }
             }
@@ -663,20 +662,19 @@ impl App {
                     .get(self.list_state.selected().unwrap_or(0))
                 {
                     let host = self.hosts[idx].clone();
-                    if self.pending_connection.is_none() {
-                        if let Err(e) =
+                    if self.pending_connection.is_none()
+                        && let Err(e) =
                             self.start_pending_connection(PendingConnectionKind::Sftp, host)
-                        {
-                            self.connection_history.record(
-                                &self.hosts[self
-                                    .filtered_indices
-                                    .get(self.list_state.selected().unwrap_or(0))
-                                    .copied()
-                                    .unwrap_or(idx)]
-                                .alias,
-                            );
-                            self.set_status(format!("SFTP failed: {e}"));
-                        }
+                    {
+                        self.connection_history.record(
+                            &self.hosts[self
+                                .filtered_indices
+                                .get(self.list_state.selected().unwrap_or(0))
+                                .copied()
+                                .unwrap_or(idx)]
+                            .alias,
+                        );
+                        self.set_status(format!("SFTP failed: {e}"));
                     }
                 }
             }
@@ -1428,11 +1426,11 @@ impl App {
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("proxy jump host '{jump_alias}' not found"))?;
                 Ok(ConnectionRoute::ViaProxyJump {
-                    bastion,
-                    target: host.clone(),
+                    bastion: Box::new(bastion),
+                    target: Box::new(host.clone()),
                 })
             }
-            None => Ok(ConnectionRoute::Direct(host.clone())),
+            None => Ok(ConnectionRoute::Direct(Box::new(host.clone()))),
         }
     }
 
