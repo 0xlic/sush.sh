@@ -167,8 +167,42 @@ fn field_style(focused: EditField, field: EditField) -> Style {
     }
 }
 
+fn kind_description(kind_idx: usize) -> &'static str {
+    match kind_idx {
+        0 => "Forward a local port to a remote service",
+        1 => "Expose a remote port back to your local machine",
+        _ => "Open a SOCKS proxy through the remote host",
+    }
+}
+
+fn kind_description_line(kind_idx: usize) -> Line<'static> {
+    Line::from(vec![Span::styled(
+        kind_description(kind_idx),
+        Style::default().fg(Color::Gray),
+    )])
+}
+
+fn layout_sections(inner: Rect, is_dynamic: bool) -> (Vec<Rect>, Rect, Rect) {
+    let content_rows = if is_dynamic { 6 } else { 8 };
+    let [content_area, _, error_area, hint_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(content_rows),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(1); content_rows as usize])
+        .split(content_area)
+        .to_vec();
+    (rows, error_area, hint_area)
+}
+
 pub fn render(f: &mut Frame, state: &ForwardEditState) {
-    let area = centered_rect(60, 12, f.area());
+    let area = centered_rect(60, 14, f.area());
     f.render_widget(Clear, area);
 
     let title = if state.forward_id.is_none() {
@@ -189,17 +223,18 @@ pub fn render(f: &mut Frame, state: &ForwardEditState) {
     };
 
     let is_dynamic = state.kind_idx == 2;
-    let row_count = if is_dynamic { 6 } else { 8 };
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![Constraint::Length(1); row_count])
-        .split(inner);
+    let (rows, error_area, hint_area) = layout_sections(inner, is_dynamic);
 
     let mut row = 0usize;
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(format!("{:<14}", "Host:")),
-            Span::styled(&state.host_alias, Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &state.host_alias,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])),
         rows[row],
     );
@@ -234,6 +269,12 @@ pub fn render(f: &mut Frame, state: &ForwardEditState) {
             ),
             Span::raw("  ←/→ cycle"),
         ])),
+        rows[row],
+    );
+    row += 1;
+
+    f.render_widget(
+        Paragraph::new(kind_description_line(state.kind_idx)),
         rows[row],
     );
     row += 1;
@@ -303,16 +344,32 @@ pub fn render(f: &mut Frame, state: &ForwardEditState) {
         ])),
         rows[row],
     );
-    row += 1;
 
-    let hint_text = if let Some(error) = &state.error {
-        Span::styled(error.as_str(), Style::default().fg(Color::Red))
-    } else {
-        Span::raw("Tab:next  ←/→:cycle kind  Space:toggle  Ctrl-S:save  Esc:cancel")
-    };
-    if row < rows.len() {
-        f.render_widget(Paragraph::new(Line::from(vec![hint_text])), rows[row]);
+    if let Some(error) = &state.error {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                error.as_str(),
+                Style::default().fg(Color::Red),
+            )])),
+            error_area,
+        );
     }
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::raw(":next  "),
+            Span::styled("←/→", Style::default().fg(Color::Yellow)),
+            Span::raw(":cycle kind  "),
+            Span::styled("Space", Style::default().fg(Color::Yellow)),
+            Span::raw(":toggle  "),
+            Span::styled("Ctrl-S", Style::default().fg(Color::Yellow)),
+            Span::raw(":save  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(":cancel"),
+        ])),
+        hint_area,
+    );
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -357,5 +414,40 @@ mod tests {
         let error = state.validate().unwrap_err();
 
         assert_eq!(error, "Remote Host is required");
+    }
+
+    #[test]
+    fn kind_descriptions_match_expected_copy() {
+        assert_eq!(
+            kind_description(0),
+            "Forward a local port to a remote service"
+        );
+        assert_eq!(
+            kind_description(1),
+            "Expose a remote port back to your local machine"
+        );
+        assert_eq!(
+            kind_description(2),
+            "Open a SOCKS proxy through the remote host"
+        );
+    }
+
+    #[test]
+    fn layout_sections_keep_footer_at_bottom() {
+        let inner = Rect::new(2, 3, 58, 12);
+        let (rows, error_area, hint_area) = layout_sections(inner, false);
+
+        assert_eq!(rows.len(), 8);
+        assert_eq!(hint_area.y + hint_area.height, inner.y + inner.height);
+        assert_eq!(error_area.y + error_area.height, hint_area.y);
+        assert!(rows.last().unwrap().y < error_area.y);
+    }
+
+    #[test]
+    fn kind_description_line_is_left_aligned() {
+        let line = kind_description_line(1);
+
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content.as_ref(), kind_description(1));
     }
 }
