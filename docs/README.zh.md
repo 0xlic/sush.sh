@@ -84,10 +84,12 @@
 
 | 平台 | 文件 |
 |------|------|
-| macOS（Apple Silicon）| `sush-macos-arm64` |
-| macOS（Intel）| `sush-macos-x86_64` |
-| Linux x86_64 | `sush-linux-x86_64` |
-| Windows x86_64 | `sush-windows-x86_64.exe` |
+| macOS（Apple Silicon）| `sush-aarch64-apple-darwin.tar.xz` |
+| macOS（Intel）| `sush-x86_64-apple-darwin.tar.xz` |
+| Linux arm64 | `sush-aarch64-unknown-linux-gnu.tar.xz` |
+| Linux x86_64 | `sush-x86_64-unknown-linux-gnu.tar.xz` |
+| Windows x86 | `sush-i686-pc-windows-msvc.zip` |
+| Windows x86_64 | `sush-x86_64-pc-windows-msvc.zip` |
 
 ```sh
 # macOS / Linux
@@ -216,7 +218,7 @@ SFTP 多选模式下，本地和远程面板分别维护各自的选中集合。
 | **v0.6** ✅ | 系统钥匙串凭证存储 · 认证成功后静默保存 · Linux 无 Secret Service 时仅临时输入 |
 | **v0.7** ✅ | 文件夹递归传输与聚合进度 · 远程文件编辑并保存后自动上传 · 双面板 SFTP · 后台传输队列 · 断点续传 |
 | **v0.8** ✅ | 端口转发管理 · 单跳 ProxyJump · SOCKS5 代理 · 转发状态视图 |
-| v1.0 | Homebrew/AUR/Scoop 分发 · man page · 全平台测试 |
+| v1.0 | macOS smoke test · GitHub Actions 六平台二进制发布 · 文档一致性 |
 
 ---
 

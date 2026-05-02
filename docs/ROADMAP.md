@@ -69,12 +69,10 @@
 
 ## v1.0 — 稳定发布
 
-- [ ] 全平台测试覆盖（macOS / Linux / Windows）
-- [ ] Homebrew / AUR / Scoop 分发
-- [ ] cargo install 支持
-- [ ] 完整的错误处理 + 边界场景
-- [ ] 性能优化 + 内存优化
-- [ ] 用户文档 + man page
+- [x] macOS 核心功能 smoke test
+- [x] GitHub Actions + cargo-dist 六平台二进制自动发布
+- [x] 文档完整性（README 中英文与当前功能对齐）
+- [x] 更新 Cargo.toml version 至 1.0.0 并推送 tag
 
 ## 长期愿景（v1.x+）
 

@@ -1,6 +1,6 @@
 [package]
 name = "sush"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "A lightweight TUI SSH + SFTP manager"
 license = "MIT"
@@ -60,3 +60,8 @@ strip = true
 lto = true
 codegen-units = 1
 opt-level = "z"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

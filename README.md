@@ -65,6 +65,13 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 - `Enter` to navigate directories
 - One connection-scoped FIFO queue keeps transfers running while you move between Main, SSH, and SFTP
 
+**Port forwarding management**
+- Press `p` from the main view to open the forwarding manager — host list on the left, rules on the right
+- Local, remote, and dynamic (SOCKS5) forwarding rules, stored per host
+- Single-hop ProxyJump: rules can tunnel through a bastion before the target host
+- A background daemon holds open connections so forwards survive after you exit sush
+- Status column shows `Running`, `Reconnecting`, `Error`, etc. in real time
+
 **Snappy**
 - Starts in under 200ms
 - Search responds in under 50ms
@@ -80,10 +87,12 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 | Platform       | File                        |
 |----------------|-----------------------------|
-| macOS (Apple)  | `sush-macos-arm64`          |
-| macOS (Intel)  | `sush-macos-x86_64`         |
-| Linux x86_64   | `sush-linux-x86_64`         |
-| Windows x86_64 | `sush-windows-x86_64.exe`   |
+| macOS (Apple)  | `sush-aarch64-apple-darwin.tar.xz`       |
+| macOS (Intel)  | `sush-x86_64-apple-darwin.tar.xz`        |
+| Linux arm64    | `sush-aarch64-unknown-linux-gnu.tar.xz`  |
+| Linux x86_64   | `sush-x86_64-unknown-linux-gnu.tar.xz`   |
+| Windows x86    | `sush-i686-pc-windows-msvc.zip`          |
+| Windows x86_64 | `sush-x86_64-pc-windows-msvc.zip`        |
 
 ```sh
 # macOS / Linux
@@ -125,6 +134,7 @@ On first launch, `sush` will ask whether to import from `~/.ssh/config`. You can
 | `d` | Delete selected host |
 | `i` | Import from `~/.ssh/config` |
 | `f` | Toggle folder sidebar |
+| `p` | Open port forwarding manager |
 | `j` | Jump to folder (when folders are focused) |
 | `q` | Quit |
 
@@ -195,7 +205,7 @@ For normal files, repeated uploads and downloads now resume from the existing ta
 | **v0.6** ✅ | System keyring credential storage · silent save after successful auth · temporary input only when Secret Service is unavailable |
 | **v0.7** ✅ | Recursive folder transfer with aggregate progress · remote file editing with auto-upload on save · dual-pane SFTP · background transfer queue · resume support |
 | **v0.8** ✅ | Port forwarding manager · single-hop ProxyJump · SOCKS5 proxy · tunnel status view |
-| v1.0 | Homebrew/AUR/Scoop · man page · full platform testing |
+| v1.0 | macOS smoke test · GitHub Actions binary releases · doc consistency |
 
 ---
 
