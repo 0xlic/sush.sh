@@ -16,6 +16,8 @@ pub struct SftpPaneState {
     pub side: PaneSide,
     pub local_path: std::path::PathBuf,
     pub remote_path: String,
+    pub local_all_entries: Vec<FileEntry>,
+    pub remote_all_entries: Vec<FileEntry>,
     pub local_entries: Vec<FileEntry>,
     pub remote_entries: Vec<FileEntry>,
     pub local_list_state: ratatui::widgets::ListState,
@@ -44,6 +46,8 @@ impl SftpPaneState {
             side: PaneSide::Remote,
             local_path: std::env::current_dir().unwrap_or_default(),
             remote_path: remote_home,
+            local_all_entries: Vec::new(),
+            remote_all_entries: Vec::new(),
             local_entries: Vec::new(),
             remote_entries: Vec::new(),
             local_list_state,
@@ -72,6 +76,39 @@ impl SftpPaneState {
         match self.side {
             PaneSide::Local => &mut self.local_list_state,
             PaneSide::Remote => &mut self.remote_list_state,
+        }
+    }
+
+    pub fn set_local_entries(&mut self, entries: Vec<FileEntry>) {
+        self.local_all_entries = entries.clone();
+        self.local_entries = entries;
+        self.local_selection.clear();
+        self.local_list_state
+            .select((!self.local_entries.is_empty()).then_some(0));
+    }
+
+    pub fn set_remote_entries(&mut self, entries: Vec<FileEntry>) {
+        self.remote_all_entries = entries.clone();
+        self.remote_entries = entries;
+        self.remote_selection.clear();
+        self.remote_list_state
+            .select((!self.remote_entries.is_empty()).then_some(0));
+    }
+
+    pub fn filter_active_entries(&mut self, query: &str) {
+        match self.side {
+            PaneSide::Local => {
+                self.local_entries = filter_entries(&self.local_all_entries, query);
+                self.local_selection.clear();
+                self.local_list_state
+                    .select((!self.local_entries.is_empty()).then_some(0));
+            }
+            PaneSide::Remote => {
+                self.remote_entries = filter_entries(&self.remote_all_entries, query);
+                self.remote_selection.clear();
+                self.remote_list_state
+                    .select((!self.remote_entries.is_empty()).then_some(0));
+            }
         }
     }
 
@@ -177,6 +214,37 @@ impl SftpPaneState {
             }
         }
     }
+}
+
+fn filter_entries(entries: &[FileEntry], query: &str) -> Vec<FileEntry> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return entries.to_vec();
+    }
+
+    use nucleo::{Config, Matcher, Utf32Str};
+    use std::cmp::Reverse;
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut needle_buf = Vec::new();
+    let needle = Utf32Str::new(&query, &mut needle_buf);
+    let mut scored: Vec<(usize, u32)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let haystack = entry.name.to_lowercase();
+            let mut haystack_buf = Vec::new();
+            let haystack = Utf32Str::new(&haystack, &mut haystack_buf);
+            matcher
+                .fuzzy_match(haystack, needle)
+                .map(|score| (index, score as u32))
+        })
+        .collect();
+    scored.sort_by_key(|&(_, score)| Reverse(score));
+    scored
+        .into_iter()
+        .map(|(index, _)| entries[index].clone())
+        .collect()
 }
 
 fn apply_range_selection(selection: &mut BTreeSet<usize>, anchor: usize, current: usize) {

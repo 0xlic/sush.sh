@@ -421,6 +421,21 @@ struct SftpDeleteConfirmState {
     selected_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SftpPromptKind {
+    Search,
+    Goto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SftpPromptState {
+    kind: SftpPromptKind,
+    side: PaneSide,
+    input: String,
+    candidates: Vec<String>,
+    selected_candidate: usize,
+}
+
 pub struct App {
     pub mode: AppMode,
     pub hosts: Vec<Host>,
@@ -434,6 +449,7 @@ pub struct App {
     pub trigger_connect: bool,
     pub trigger_sftp: bool,
     pub trigger_pane_enter: bool,
+    pub trigger_pane_parent: bool,
     pub trigger_download: bool,
     pub trigger_upload: bool,
     pub trigger_sftp_delete: bool,
@@ -445,6 +461,8 @@ pub struct App {
     pub active_session: Option<ActiveSession>,
     pub sftp_client: Option<SftpClient>,
     pub sftp_pane: Option<SftpPaneState>,
+    sftp_prompt: Option<SftpPromptState>,
+    pending_sftp_goto: Option<(PaneSide, String)>,
     pub current_host_alias: Option<String>,
     pub current_host_hostname: Option<String>,
     pub active_transfer: Option<ActiveTransfer>,
@@ -512,6 +530,7 @@ impl App {
             trigger_connect: false,
             trigger_sftp: false,
             trigger_pane_enter: false,
+            trigger_pane_parent: false,
             trigger_download: false,
             trigger_upload: false,
             trigger_sftp_delete: false,
@@ -523,6 +542,8 @@ impl App {
             active_session: None,
             sftp_client: None,
             sftp_pane: None,
+            sftp_prompt: None,
+            pending_sftp_goto: None,
             current_host_alias: None,
             current_host_hostname: None,
             active_transfer: None,
@@ -700,6 +721,19 @@ impl App {
                 }
             }
 
+            if self.trigger_pane_parent {
+                self.trigger_pane_parent = false;
+                if let Err(e) = self.pane_parent().await {
+                    self.set_status(format!("Navigation failed: {e}"));
+                }
+            }
+
+            if let Some((side, path)) = self.pending_sftp_goto.take()
+                && let Err(e) = self.pane_goto(side, &path).await
+            {
+                self.set_status(format!("Goto failed: {e}"));
+            }
+
             // Trigger download.
             if self.trigger_download {
                 self.trigger_download = false;
@@ -736,7 +770,7 @@ impl App {
                 if let Some(pane) = &mut self.sftp_pane
                     && let Ok(entries) = list_local(&pane.local_path)
                 {
-                    pane.local_entries = entries;
+                    pane.set_local_entries(entries);
                 }
             }
 
@@ -749,7 +783,7 @@ impl App {
                         && let Ok(entries) = client.list_dir(&path).await
                         && let Some(pane) = &mut self.sftp_pane
                     {
-                        pane.remote_entries = entries;
+                        pane.set_remote_entries(entries);
                     }
                 }
             }
@@ -1102,6 +1136,11 @@ impl App {
     }
 
     fn handle_sftp_key(&mut self, k: KeyEvent) {
+        if self.sftp_prompt.is_some() {
+            self.handle_sftp_prompt_key(k);
+            return;
+        }
+
         match (k.code, k.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 let now = Instant::now();
@@ -1142,12 +1181,126 @@ impl App {
             (KeyCode::Char('u'), KeyModifiers::NONE) => self.trigger_upload = true,
             (KeyCode::Char('D'), KeyModifiers::NONE) => self.trigger_sftp_delete_confirm(),
             (KeyCode::Char('e'), KeyModifiers::NONE) => self.trigger_remote_edit(),
+            (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                self.start_sftp_prompt(SftpPromptKind::Search)
+            }
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                self.start_sftp_prompt(SftpPromptKind::Goto)
+            }
             // D delete and r rename are not implemented yet.
             (KeyCode::Tab, _) => self.toggle_pane(),
             (KeyCode::Up, _) => self.pane_select_prev(),
             (KeyCode::Down, _) => self.pane_select_next(),
-            (KeyCode::Enter, _) => self.trigger_pane_enter = true,
+            (KeyCode::Enter, _) | (KeyCode::Right, _) => self.trigger_pane_enter = true,
+            (KeyCode::Backspace, _) | (KeyCode::Left, _) => self.trigger_pane_parent = true,
             _ => {}
+        }
+    }
+
+    fn start_sftp_prompt(&mut self, kind: SftpPromptKind) {
+        let Some(pane) = &mut self.sftp_pane else {
+            return;
+        };
+        if kind == SftpPromptKind::Search {
+            pane.filter_active_entries("");
+        }
+        let mut prompt = SftpPromptState {
+            kind,
+            side: pane.side,
+            input: String::new(),
+            candidates: Vec::new(),
+            selected_candidate: 0,
+        };
+        self.refresh_sftp_prompt_candidates(&mut prompt);
+        self.sftp_prompt = Some(prompt);
+    }
+
+    fn handle_sftp_prompt_key(&mut self, k: KeyEvent) {
+        let Some(mut prompt) = self.sftp_prompt.take() else {
+            return;
+        };
+
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) => {
+                if prompt.kind == SftpPromptKind::Search
+                    && let Some(pane) = &mut self.sftp_pane
+                {
+                    pane.filter_active_entries("");
+                }
+            }
+            (KeyCode::Enter, _) => {
+                if prompt.kind == SftpPromptKind::Goto && !prompt.input.trim().is_empty() {
+                    self.pending_sftp_goto = Some((prompt.side, prompt.input.trim().to_string()));
+                }
+                if prompt.kind == SftpPromptKind::Search {
+                    self.sftp_prompt = None;
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                prompt.input.pop();
+                if prompt.kind == SftpPromptKind::Search
+                    && let Some(pane) = &mut self.sftp_pane
+                {
+                    pane.filter_active_entries(&prompt.input);
+                }
+                self.refresh_sftp_prompt_candidates(&mut prompt);
+                self.sftp_prompt = Some(prompt);
+            }
+            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+                prompt.input.push(c);
+                if prompt.kind == SftpPromptKind::Search
+                    && let Some(pane) = &mut self.sftp_pane
+                {
+                    pane.filter_active_entries(&prompt.input);
+                }
+                self.refresh_sftp_prompt_candidates(&mut prompt);
+                self.sftp_prompt = Some(prompt);
+            }
+            (KeyCode::Tab, _) if prompt.kind == SftpPromptKind::Goto => {
+                if let Some(candidate) = prompt.candidates.get(prompt.selected_candidate).cloned() {
+                    prompt.input = candidate;
+                }
+                self.refresh_sftp_prompt_candidates(&mut prompt);
+                self.sftp_prompt = Some(prompt);
+            }
+            (KeyCode::Up, _) if prompt.kind == SftpPromptKind::Goto => {
+                if !prompt.candidates.is_empty() {
+                    prompt.selected_candidate = prompt
+                        .selected_candidate
+                        .checked_sub(1)
+                        .unwrap_or(prompt.candidates.len() - 1);
+                }
+                self.sftp_prompt = Some(prompt);
+            }
+            (KeyCode::Down, _) if prompt.kind == SftpPromptKind::Goto => {
+                if !prompt.candidates.is_empty() {
+                    prompt.selected_candidate =
+                        (prompt.selected_candidate + 1) % prompt.candidates.len();
+                }
+                self.sftp_prompt = Some(prompt);
+            }
+            _ => {
+                self.sftp_prompt = Some(prompt);
+            }
+        }
+    }
+
+    fn refresh_sftp_prompt_candidates(&self, prompt: &mut SftpPromptState) {
+        if prompt.kind != SftpPromptKind::Goto {
+            prompt.candidates.clear();
+            prompt.selected_candidate = 0;
+            return;
+        }
+
+        let Some(pane) = &self.sftp_pane else {
+            prompt.candidates.clear();
+            prompt.selected_candidate = 0;
+            return;
+        };
+
+        prompt.candidates = sftp_goto_candidates(pane, prompt.side, &prompt.input);
+        if prompt.selected_candidate >= prompt.candidates.len() {
+            prompt.selected_candidate = 0;
         }
     }
 
@@ -1189,6 +1342,8 @@ impl App {
 
     fn exit_sftp(&mut self) {
         self.sftp_delete_confirm = None;
+        self.sftp_prompt = None;
+        self.pending_sftp_goto = None;
         self.mode = AppMode::Main;
     }
 
@@ -1210,6 +1365,8 @@ impl App {
         self.clear_transfer_queue();
         self.sftp_client = None;
         self.sftp_pane = None;
+        self.sftp_prompt = None;
+        self.pending_sftp_goto = None;
         self.remote_edit_session = None;
         self.current_host_alias = None;
         self.current_host_hostname = None;
@@ -1769,6 +1926,38 @@ impl App {
 
     fn remote_edit_status(&self) -> Option<&str> {
         self.status_msg.as_ref().map(|(msg, _)| msg.as_str())
+    }
+
+    fn sftp_prompt_status(&self) -> Option<String> {
+        self.sftp_prompt.as_ref().map(|prompt| {
+            let side = match prompt.side {
+                PaneSide::Local => "local",
+                PaneSide::Remote => "remote",
+            };
+            let label = match prompt.kind {
+                SftpPromptKind::Search => "Search",
+                SftpPromptKind::Goto => "Goto",
+            };
+            let mut status = format!("{label} {side}: {}", prompt.input);
+            if prompt.kind == SftpPromptKind::Goto && !prompt.candidates.is_empty() {
+                let candidates = prompt
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, candidate)| {
+                        if idx == prompt.selected_candidate {
+                            format!("[{candidate}]")
+                        } else {
+                            candidate.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                status.push_str("  ");
+                status.push_str(&candidates);
+            }
+            status
+        })
     }
 
     fn reset_probe(&mut self) {
@@ -2896,8 +3085,8 @@ impl App {
         let local_entries = list_local(&local_path).unwrap_or_default();
 
         let mut pane = SftpPaneState::new(home);
-        pane.remote_entries = remote_entries;
-        pane.local_entries = local_entries;
+        pane.set_remote_entries(remote_entries);
+        pane.set_local_entries(local_entries);
 
         self.sftp_client = Some(client);
         self.sftp_pane = Some(pane);
@@ -2937,8 +3126,7 @@ impl App {
                             Ok(entries) => {
                                 let pane = self.sftp_pane.as_mut().unwrap();
                                 pane.remote_path = new_path;
-                                pane.remote_entries = entries;
-                                pane.remote_list_state.select(Some(0));
+                                pane.set_remote_entries(entries);
                             }
                             Err(e) => eprintln!("[List directory failed: {e}]"),
                         }
@@ -2963,14 +3151,59 @@ impl App {
                         Ok(entries) => {
                             let pane = self.sftp_pane.as_mut().unwrap();
                             pane.local_path = new_path;
-                            pane.local_entries = entries;
-                            pane.local_list_state.select(Some(0));
+                            pane.set_local_entries(entries);
                         }
                         Err(e) => eprintln!("[List local directory failed: {e}]"),
                     }
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn pane_parent(&mut self) -> Result<()> {
+        let Some(pane) = &self.sftp_pane else {
+            return Ok(());
+        };
+        let side = pane.side;
+        let target = match side {
+            PaneSide::Local => pane
+                .local_path
+                .parent()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| pane.local_path.to_string_lossy().into_owned()),
+            PaneSide::Remote => remote_parent_path(&pane.remote_path),
+        };
+        self.pane_goto(side, &target).await
+    }
+
+    async fn pane_goto(&mut self, side: PaneSide, input: &str) -> Result<()> {
+        let Some(pane) = &self.sftp_pane else {
+            return Ok(());
+        };
+
+        match side {
+            PaneSide::Local => {
+                let target = resolve_local_path(&pane.local_path, input);
+                let entries = list_local(&target)?;
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.local_path = target;
+                    pane.set_local_entries(entries);
+                }
+            }
+            PaneSide::Remote => {
+                let target = resolve_remote_path(&pane.remote_path, input);
+                let Some(client) = &self.sftp_client else {
+                    bail!("missing SFTP client for remote navigation");
+                };
+                let entries = client.list_dir(&target).await?;
+                if let Some(pane) = &mut self.sftp_pane {
+                    pane.remote_path = target;
+                    pane.set_remote_entries(entries);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -3591,8 +3824,8 @@ impl App {
             let local_entries = list_local(&local_path).unwrap_or_default();
 
             let mut pane = SftpPaneState::new(home);
-            pane.remote_entries = remote_entries;
-            pane.local_entries = local_entries;
+            pane.set_remote_entries(remote_entries);
+            pane.set_local_entries(local_entries);
             self.sftp_client = Some(client);
             self.sftp_pane = Some(pane);
         }
@@ -3721,7 +3954,10 @@ impl App {
                 }
             }
             AppMode::Sftp => {
-                let status_msg = self.remote_edit_status().map(str::to_owned);
+                let status_msg = self
+                    .sftp_prompt_status()
+                    .or_else(|| self.remote_edit_status().map(str::to_owned))
+                    .or_else(|| self.status_msg.as_ref().map(|(msg, _)| msg.clone()));
                 let transfer_badge = self.global_transfer_badge();
                 if let Some(pane) = &mut self.sftp_pane {
                     let host_address = self
@@ -4013,6 +4249,75 @@ fn utf8_char_width(byte: u8) -> usize {
     }
 }
 
+fn resolve_local_path(base: &Path, input: &str) -> PathBuf {
+    let path = PathBuf::from(input);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn resolve_remote_path(base: &str, input: &str) -> String {
+    if input.starts_with('/') {
+        normalize_remote_path(input)
+    } else {
+        normalize_remote_path(&format!("{}/{}", base.trim_end_matches('/'), input))
+    }
+}
+
+fn remote_parent_path(path: &str) -> String {
+    let normalized = normalize_remote_path(path);
+    if normalized == "/" {
+        return normalized;
+    }
+    normalized
+        .rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() {
+                "/".into()
+            } else {
+                parent.into()
+            }
+        })
+        .unwrap_or_else(|| "/".into())
+}
+
+fn normalize_remote_path(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        "/".into()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
+}
+
+fn sftp_goto_candidates(pane: &SftpPaneState, side: PaneSide, input: &str) -> Vec<String> {
+    if input.contains('/') {
+        return Vec::new();
+    }
+
+    let entries = match side {
+        PaneSide::Local => &pane.local_all_entries,
+        PaneSide::Remote => &pane.remote_all_entries,
+    };
+
+    entries
+        .iter()
+        .filter(|entry| entry.is_dir && entry.name.starts_with(input))
+        .map(|entry| format!("{}/", entry.name))
+        .collect()
+}
+
 fn expand_tilde(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix("~/")
@@ -4063,6 +4368,7 @@ mod tests {
             trigger_connect: false,
             trigger_sftp: false,
             trigger_pane_enter: false,
+            trigger_pane_parent: false,
             trigger_download: false,
             trigger_upload: false,
             trigger_sftp_delete: false,
@@ -4074,6 +4380,8 @@ mod tests {
             active_session: None,
             sftp_client: None,
             sftp_pane: None,
+            sftp_prompt: None,
+            pending_sftp_goto: None,
             current_host_alias: None,
             current_host_hostname: None,
             active_transfer: None,
@@ -4193,8 +4501,8 @@ mod tests {
         let mut pane = SftpPaneState::new("/remote".into());
         pane.side = side;
         match side {
-            PaneSide::Local => pane.local_entries = entries,
-            PaneSide::Remote => pane.remote_entries = entries,
+            PaneSide::Local => pane.set_local_entries(entries),
+            PaneSide::Remote => pane.set_remote_entries(entries),
         }
         match side {
             PaneSide::Local => pane.local_list_state.select(Some(0)),
@@ -4501,6 +4809,101 @@ mod tests {
         );
         app.handle_sftp_key(KeyEvent::from(KeyCode::Char('e')));
         assert!(!app.trigger_remote_edit);
+    }
+
+    #[test]
+    fn backspace_in_sftp_triggers_parent_navigation() {
+        let mut app = app_with_sftp_pane(PaneSide::Local, vec![file_entry("child", true)]);
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Backspace));
+
+        assert!(app.trigger_pane_parent);
+    }
+
+    #[test]
+    fn right_in_sftp_triggers_enter_navigation() {
+        let mut app = app_with_sftp_pane(PaneSide::Local, vec![file_entry("child", true)]);
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Right));
+
+        assert!(app.trigger_pane_enter);
+    }
+
+    #[test]
+    fn sftp_search_filters_active_list() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Remote,
+            vec![
+                file_entry("alpha.txt", false),
+                file_entry("logs", true),
+                file_entry("notes.md", false),
+            ],
+        );
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('/')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('l')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('o')));
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.remote_entries.len(), 1);
+        assert_eq!(pane.remote_entries[0].name, "logs");
+    }
+
+    #[test]
+    fn sftp_goto_prompt_queues_target_path() {
+        let mut app = app_with_sftp_pane(PaneSide::Local, vec![]);
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('r')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('c')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.pending_sftp_goto, Some((PaneSide::Local, "src".into())));
+    }
+
+    #[test]
+    fn sftp_goto_tab_completes_current_directory_candidate() {
+        let mut app = app_with_sftp_pane(
+            PaneSide::Local,
+            vec![file_entry("src", true), file_entry("scripts", true)],
+        );
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Char('r')));
+
+        let status = app.sftp_prompt_status().unwrap();
+        assert!(status.contains("src/"));
+
+        app.handle_sftp_key(KeyEvent::from(KeyCode::Tab));
+
+        let prompt = app.sftp_prompt.as_ref().unwrap();
+        assert_eq!(prompt.input, "src/");
+    }
+
+    #[test]
+    fn sftp_local_parent_moves_to_parent_directory() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(temp.path().join("root.txt"), "root").unwrap();
+
+        let mut app = app_with_sftp_pane(PaneSide::Local, vec![]);
+        let pane = app.sftp_pane.as_mut().unwrap();
+        pane.local_path = child;
+        pane.local_entries = vec![];
+
+        runtime.block_on(app.pane_parent()).unwrap();
+
+        let pane = app.sftp_pane.as_ref().unwrap();
+        assert_eq!(pane.local_path, temp.path());
+        assert!(
+            pane.local_entries
+                .iter()
+                .any(|entry| entry.name == "root.txt")
+        );
     }
 
     #[test]
