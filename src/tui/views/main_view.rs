@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::app::{App, MainFocus};
+use crate::tui::theme::selection_highlight_style;
 use crate::tui::views::folder_view::{FolderNode, FolderViewState, JumpState};
 use crate::tui::widgets::host_list::HostList;
 use crate::tui::widgets::search_input::SearchInput;
@@ -170,11 +171,9 @@ fn render_directory_panel(f: &mut Frame, area: Rect, state: &FolderViewState, fo
     dir_state.select(Some(state.sel_a));
 
     f.render_stateful_widget(
-        List::new(items).block(block).highlight_style(
-            Style::default()
-                .add_modifier(Modifier::REVERSED)
-                .fg(Color::Yellow),
-        ),
+        List::new(items)
+            .block(block)
+            .highlight_style(selection_highlight_style()),
         area,
         &mut dir_state,
     );
@@ -234,5 +233,18 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
         y: area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_selection_highlight_matches_sftp_style() {
+        assert_eq!(
+            selection_highlight_style(),
+            Style::default().add_modifier(Modifier::REVERSED)
+        );
     }
 }

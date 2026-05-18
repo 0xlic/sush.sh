@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, StatefulWidget, Widget};
 
 use crate::config::host::Host;
+use crate::tui::theme::selection_highlight_style;
 
 pub struct HostList<'a> {
     pub hosts: &'a [Host],
@@ -120,11 +121,7 @@ impl<'a> StatefulWidget for HostList<'a> {
 
         let mut list = List::new(items);
         if self.show_selection {
-            list = list.highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::REVERSED)
-                    .fg(Color::Yellow),
-            );
+            list = list.highlight_style(selection_highlight_style());
         }
 
         let mut render_state = ListState::default();
@@ -243,6 +240,14 @@ mod tests {
         assert!(
             !content.contains('●'),
             "probe dot should be hidden when selection is disabled:\n{content}"
+        );
+    }
+
+    #[test]
+    fn selection_highlight_matches_sftp_style() {
+        assert_eq!(
+            selection_highlight_style(),
+            Style::default().add_modifier(Modifier::REVERSED)
         );
     }
 }

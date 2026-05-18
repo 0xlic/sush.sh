@@ -446,6 +446,7 @@ pub struct App {
     pub sftp_client: Option<SftpClient>,
     pub sftp_pane: Option<SftpPaneState>,
     pub current_host_alias: Option<String>,
+    pub current_host_hostname: Option<String>,
     pub active_transfer: Option<ActiveTransfer>,
     pub queued_transfers: VecDeque<QueuedTransfer>,
     queue_completed_count: usize,
@@ -523,6 +524,7 @@ impl App {
             sftp_client: None,
             sftp_pane: None,
             current_host_alias: None,
+            current_host_hostname: None,
             active_transfer: None,
             queued_transfers: VecDeque::new(),
             queue_completed_count: 0,
@@ -1210,6 +1212,7 @@ impl App {
         self.sftp_pane = None;
         self.remote_edit_session = None;
         self.current_host_alias = None;
+        self.current_host_hostname = None;
         self.sftp_delete_confirm = None;
     }
 
@@ -2899,6 +2902,7 @@ impl App {
         self.sftp_client = Some(client);
         self.sftp_pane = Some(pane);
         self.current_host_alias = Some(host.alias.clone());
+        self.current_host_hostname = Some(host.hostname.clone());
         self.active_session = Some(session);
         self.mode = AppMode::Sftp;
         self.connection_history.record(&host.alias);
@@ -3444,6 +3448,7 @@ impl App {
         self.terminal_emulator = Some(TerminalEmulator::new(cols, term_rows));
         self.active_session = Some(session);
         self.current_host_alias = Some(host.alias.clone());
+        self.current_host_hostname = Some(host.hostname.clone());
         self.mode = AppMode::Ssh;
         self.connection_history.record(&host.alias);
         self.ssh_last_size = Some((cols, rows));
@@ -3719,10 +3724,14 @@ impl App {
                 let status_msg = self.remote_edit_status().map(str::to_owned);
                 let transfer_badge = self.global_transfer_badge();
                 if let Some(pane) = &mut self.sftp_pane {
-                    let alias = self.current_host_alias.as_deref().unwrap_or("");
+                    let host_address = self
+                        .current_host_hostname
+                        .as_deref()
+                        .or(self.current_host_alias.as_deref())
+                        .unwrap_or("");
                     sftp_view::render(
                         f,
-                        alias,
+                        host_address,
                         pane,
                         status_msg.as_deref(),
                         transfer_badge.as_ref(),
@@ -4066,6 +4075,7 @@ mod tests {
             sftp_client: None,
             sftp_pane: None,
             current_host_alias: None,
+            current_host_hostname: None,
             active_transfer: None,
             queued_transfers: VecDeque::new(),
             queue_completed_count: 0,

@@ -7,12 +7,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, StatefulWidget};
 
 use crate::sftp::client::FileEntry;
+use crate::tui::theme::selection_highlight_style;
 
 pub struct FileList<'a> {
     pub entries: &'a [FileEntry],
     pub title: &'a str,
     pub chrome_style: Style,
     pub selected_indices: &'a BTreeSet<usize>,
+    pub focused: bool,
 }
 
 impl<'a> StatefulWidget for FileList<'a> {
@@ -47,13 +49,18 @@ impl<'a> StatefulWidget for FileList<'a> {
             self.title.to_string(),
             self.chrome_style.add_modifier(Modifier::BOLD),
         );
+        let highlight_style = if self.focused {
+            selection_highlight_style()
+        } else {
+            Style::default()
+        };
         List::new(items)
             .block(
                 Block::bordered()
                     .border_style(self.chrome_style)
                     .title(title),
             )
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_style(highlight_style)
             .render(area, buf, state);
     }
 }
@@ -85,6 +92,14 @@ fn human_size(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+    use ratatui::widgets::StatefulWidget;
+
+    use crate::sftp::client::FileEntry;
+
+    use super::FileList;
     use super::entry_prefix;
 
     #[test]
@@ -95,5 +110,35 @@ mod tests {
     #[test]
     fn unselected_directory_keeps_directory_prefix() {
         assert_eq!(entry_prefix(false, true), "▸ ");
+    }
+
+    #[test]
+    fn selected_row_is_not_highlighted_when_list_is_unfocused() {
+        let entries = vec![FileEntry {
+            name: "file.txt".into(),
+            size: 10,
+            is_dir: false,
+        }];
+        let selected_indices = Default::default();
+        let mut state = ratatui::widgets::ListState::default();
+        state.select(Some(0));
+        let area = Rect::new(0, 0, 30, 5);
+        let mut buf = Buffer::empty(area);
+
+        StatefulWidget::render(
+            FileList {
+                entries: &entries,
+                title: "Local",
+                chrome_style: Default::default(),
+                selected_indices: &selected_indices,
+                focused: false,
+            },
+            area,
+            &mut buf,
+            &mut state,
+        );
+
+        let selected_cell = buf.cell((1, 1)).expect("selected row cell should exist");
+        assert!(!selected_cell.modifier.contains(Modifier::REVERSED));
     }
 }
