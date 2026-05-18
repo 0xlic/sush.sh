@@ -1,18 +1,19 @@
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{cell::Flags, point_to_viewport};
 use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Widget};
+use ratatui::widgets::{Block, Paragraph, Widget};
 
 use crate::ssh::terminal::TerminalEmulator;
-use crate::tui::widgets::status_bar::{StatusBar, TransferBadge};
+use crate::tui::widgets::status_bar::{StatusBar, TransferBadge, build_status_message_line};
 
 pub fn render(
     f: &mut Frame,
     host_alias: &str,
     emulator: &TerminalEmulator,
+    status_msg: Option<&str>,
     transfer_badge: Option<&TransferBadge>,
 ) {
     let [terminal_area, status_area] =
@@ -25,13 +26,24 @@ pub fn render(
     f.render_widget(block, terminal_area);
     f.render_widget(TerminalView { emulator }, inner);
 
-    f.render_widget(
-        StatusBar {
-            hints: &[("Ctrl-\\", "SFTP"), ("Ctrl-D", "Disconnect")],
-            transfer_badge,
-        },
-        status_area,
-    );
+    if let Some(status) = status_msg {
+        f.render_widget(
+            Paragraph::new(build_status_message_line(
+                status,
+                transfer_badge,
+                status_area.width,
+            )),
+            status_area,
+        );
+    } else {
+        f.render_widget(
+            StatusBar {
+                hints: &[("Ctrl-\\", "SFTP"), ("Ctrl-D", "Disconnect")],
+                transfer_badge,
+            },
+            status_area,
+        );
+    }
 }
 
 struct TerminalView<'a> {
@@ -43,12 +55,11 @@ impl Widget for TerminalView<'_> {
         let content = self.emulator.renderable_content();
 
         for ic in content.display_iter {
-            let line = ic.point.line.0;
-            if line < 0 {
+            let Some(point) = point_to_viewport(content.display_offset, ic.point) else {
                 continue;
-            }
-            let x = area.x.saturating_add(ic.point.column.0 as u16);
-            let y = area.y.saturating_add(line as u16);
+            };
+            let x = area.x.saturating_add(point.column.0 as u16);
+            let y = area.y.saturating_add(point.line as u16);
             if x >= area.right() || y >= area.bottom() {
                 continue;
             }
@@ -75,14 +86,20 @@ impl Widget for TerminalView<'_> {
             if !modifier.is_empty() {
                 buf_cell.set_style(Style::default().add_modifier(modifier));
             }
+            if content
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.contains(ic.point))
+            {
+                buf_cell.modifier |= Modifier::REVERSED;
+            }
         }
 
         // Invert colors at cursor position.
         let cursor = &content.cursor;
-        let line = cursor.point.line.0;
-        if line >= 0 {
-            let x = area.x.saturating_add(cursor.point.column.0 as u16);
-            let y = area.y.saturating_add(line as u16);
+        if let Some(point) = point_to_viewport(content.display_offset, cursor.point) {
+            let x = area.x.saturating_add(point.column.0 as u16);
+            let y = area.y.saturating_add(point.line as u16);
             if x < area.right() && y < area.bottom() {
                 let c = &mut buf[(x, y)];
                 let fg = c.fg;
@@ -127,6 +144,22 @@ fn map_named(named: NamedColor) -> Color {
 mod tests {
     use super::*;
 
+    fn render_terminal_rows(emulator: &TerminalEmulator, width: u16, height: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        TerminalView { emulator }.render(area, &mut buf);
+
+        (0..height)
+            .map(|y| {
+                let mut row = String::new();
+                for x in 0..width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                row.trim_end().to_string()
+            })
+            .collect()
+    }
+
     #[test]
     fn indexed_color_passes_through() {
         assert_eq!(map_color(AColor::Indexed(42)), Color::Indexed(42));
@@ -157,5 +190,38 @@ mod tests {
             percent: 12,
         };
         assert_eq!(badge.to_text(), "↑ 1/3 12%");
+    }
+
+    #[test]
+    fn terminal_view_renders_scrolled_history_rows() {
+        let mut emulator = TerminalEmulator::new(10, 3);
+        emulator.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+
+        emulator.scroll_lines(2);
+
+        assert_eq!(
+            render_terminal_rows(&emulator, 10, 3),
+            vec!["one", "two", "three"]
+        );
+    }
+
+    #[test]
+    fn terminal_view_highlights_selected_cells() {
+        let mut emulator = TerminalEmulator::new(10, 3);
+        emulator.process(b"alpha\r\nbeta\r\ngamma");
+        emulator.begin_selection(1, 0);
+        emulator.update_selection(3, 0);
+
+        let area = Rect::new(0, 0, 10, 3);
+        let mut buf = Buffer::empty(area);
+        TerminalView {
+            emulator: &emulator,
+        }
+        .render(area, &mut buf);
+
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(1, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(3, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(4, 0)].modifier.contains(Modifier::REVERSED));
     }
 }

@@ -3855,16 +3855,70 @@ impl App {
     }
 
     async fn handle_ssh_input(&mut self, data: Vec<u8>) -> Result<()> {
-        let (forward, switch) = split_ssh_input(&data, SWITCH_SEQ);
-        if !forward.is_empty()
+        let capture_scroll = self
+            .terminal_emulator
+            .as_ref()
+            .is_none_or(|emulator| !emulator.is_alt_screen());
+        let action = split_ssh_input_actions(&data, SWITCH_SEQ, capture_scroll);
+        for scroll in action.scrolls {
+            self.apply_ssh_scroll(scroll);
+        }
+        for mouse in action.mouse {
+            if let Some(text) = self.apply_ssh_mouse_action(mouse) {
+                self.copy_ssh_selection_to_clipboard(text);
+            }
+        }
+        if !action.forward.is_empty()
             && let Some(session) = self.active_session.as_mut()
         {
-            session.write_input(&forward).await?;
+            session.write_input(&action.forward).await?;
         }
-        if switch {
+        if action.switch {
             self.trigger_ssh_to_sftp = true;
         }
         Ok(())
+    }
+
+    fn apply_ssh_scroll(&mut self, scroll: SshScrollAction) {
+        let Some(emulator) = &mut self.terminal_emulator else {
+            return;
+        };
+        match scroll {
+            SshScrollAction::Lines(lines) => emulator.scroll_lines(lines),
+            SshScrollAction::PageUp => emulator.scroll_page_up(),
+            SshScrollAction::PageDown => emulator.scroll_page_down(),
+        }
+    }
+
+    fn apply_ssh_mouse_action(&mut self, action: SshMouseAction) -> Option<String> {
+        let Some(emulator) = &mut self.terminal_emulator else {
+            return None;
+        };
+        match action {
+            SshMouseAction::Start { column, line } => {
+                emulator.begin_selection(column, line);
+                None
+            }
+            SshMouseAction::Update { column, line } => {
+                emulator.update_selection(column, line);
+                None
+            }
+            SshMouseAction::End { column, line } => {
+                emulator.update_selection(column, line);
+                emulator.selected_text().filter(|text| !text.is_empty())
+            }
+        }
+    }
+
+    fn copy_ssh_selection_to_clipboard(&mut self, text: String) {
+        let result = crossterm::execute!(
+            stdout(),
+            crossterm::clipboard::CopyToClipboard::to_clipboard_from(text.as_str())
+        );
+        match result {
+            Ok(()) => self.set_status(format!("Copied {} chars", text.chars().count())),
+            Err(error) => self.set_status(format!("Copy failed: {error}")),
+        }
     }
 
     async fn handle_ssh_channel_msg(
@@ -4028,7 +4082,8 @@ impl App {
                 let transfer_badge = self.global_transfer_badge();
                 if let Some(emulator) = &self.terminal_emulator {
                     let alias = self.current_host_alias.as_deref().unwrap_or("");
-                    ssh_view::render(f, alias, emulator, transfer_badge.as_ref());
+                    let status_msg = self.status_msg.as_ref().map(|(msg, _)| msg.as_str());
+                    ssh_view::render(f, alias, emulator, status_msg, transfer_badge.as_ref());
                 }
             }
             AppMode::Edit => {
@@ -4134,6 +4189,28 @@ fn fingerprint_file(path: &Path) -> Result<String> {
 
 const SWITCH_SEQ: &[u8] = b"\x1c";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SshScrollAction {
+    Lines(i32),
+    PageUp,
+    PageDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SshMouseAction {
+    Start { column: u16, line: u16 },
+    Update { column: u16, line: u16 },
+    End { column: u16, line: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshInputAction {
+    forward: Vec<u8>,
+    switch: bool,
+    scrolls: Vec<SshScrollAction>,
+    mouse: Vec<SshMouseAction>,
+}
+
 fn is_switch_key(k: KeyEvent) -> bool {
     matches!(
         (k.code, k.modifiers),
@@ -4141,19 +4218,136 @@ fn is_switch_key(k: KeyEvent) -> bool {
     )
 }
 
-fn split_ssh_input(data: &[u8], switch_seq: &[u8]) -> (Vec<u8>, bool) {
-    if switch_seq.is_empty() {
-        return (data.to_vec(), false);
+fn split_ssh_input_actions(data: &[u8], switch_seq: &[u8], capture_scroll: bool) -> SshInputAction {
+    let mut forward = Vec::new();
+    let mut scrolls = Vec::new();
+    let mut mouse = Vec::new();
+    let mut switch = false;
+    let mut i = 0;
+
+    while i < data.len() {
+        if !switch_seq.is_empty() && data[i..].starts_with(switch_seq) {
+            switch = true;
+            i += switch_seq.len();
+            continue;
+        }
+        if capture_scroll && let Some((scroll, consumed)) = decode_ssh_scroll_input(&data[i..]) {
+            scrolls.push(scroll);
+            i += consumed;
+            continue;
+        }
+        if capture_scroll && let Some((action, consumed)) = decode_ssh_mouse_input(&data[i..]) {
+            mouse.push(action);
+            i += consumed;
+            continue;
+        }
+        if capture_scroll && let Some(consumed) = sgr_mouse_sequence_len(&data[i..]) {
+            i += consumed;
+            continue;
+        }
+        forward.push(data[i]);
+        i += 1;
     }
 
-    if let Some(pos) = data
-        .windows(switch_seq.len())
-        .position(|window| window == switch_seq)
-    {
-        (data[..pos].to_vec(), true)
-    } else {
-        (data.to_vec(), false)
+    SshInputAction {
+        forward,
+        switch,
+        scrolls,
+        mouse,
     }
+}
+
+fn decode_ssh_scroll_input(data: &[u8]) -> Option<(SshScrollAction, usize)> {
+    let patterns = [
+        (b"\x1b[5~".as_slice(), SshScrollAction::PageUp),
+        (b"\x1b[6~".as_slice(), SshScrollAction::PageDown),
+    ];
+    if let Some((pattern, action)) = patterns
+        .iter()
+        .find(|(pattern, _)| data.starts_with(pattern))
+    {
+        return Some((*action, pattern.len()));
+    }
+
+    decode_sgr_mouse_scroll(data)
+}
+
+fn decode_sgr_mouse_scroll(data: &[u8]) -> Option<(SshScrollAction, usize)> {
+    let event = decode_sgr_mouse_event(data)?;
+    let action = match event.button {
+        64 => SshScrollAction::Lines(3),
+        65 => SshScrollAction::Lines(-3),
+        _ => return None,
+    };
+    Some((action, event.consumed))
+}
+
+fn decode_ssh_mouse_input(data: &[u8]) -> Option<(SshMouseAction, usize)> {
+    let event = decode_sgr_mouse_event(data)?;
+    let point = ssh_viewport_mouse_point(event.column, event.line)?;
+    let button = event.button & 0b11;
+    let motion = event.button & 0b100000 != 0;
+
+    let action = if event.release {
+        SshMouseAction::End {
+            column: point.0,
+            line: point.1,
+        }
+    } else if button == 0 && motion {
+        SshMouseAction::Update {
+            column: point.0,
+            line: point.1,
+        }
+    } else if button == 0 {
+        SshMouseAction::Start {
+            column: point.0,
+            line: point.1,
+        }
+    } else {
+        return None;
+    };
+
+    Some((action, event.consumed))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SgrMouseEvent {
+    button: u16,
+    column: u16,
+    line: u16,
+    release: bool,
+    consumed: usize,
+}
+
+fn decode_sgr_mouse_event(data: &[u8]) -> Option<SgrMouseEvent> {
+    let consumed = sgr_mouse_sequence_len(data)?;
+    let end = consumed.saturating_sub(1);
+    let release = data.get(end).is_some_and(|byte| *byte == b'm');
+    let body = std::str::from_utf8(&data[3..end]).ok()?;
+    let mut parts = body.split(';');
+    let button = parts.next()?.parse::<u16>().ok()?;
+    let column = parts.next()?.parse::<u16>().ok()?;
+    let line = parts.next()?.parse::<u16>().ok()?;
+    Some(SgrMouseEvent {
+        button,
+        column,
+        line,
+        release,
+        consumed,
+    })
+}
+
+fn ssh_viewport_mouse_point(column: u16, line: u16) -> Option<(u16, u16)> {
+    Some((column.checked_sub(2)?, line.checked_sub(2)?))
+}
+
+fn sgr_mouse_sequence_len(data: &[u8]) -> Option<usize> {
+    if !data.starts_with(b"\x1b[<") {
+        return None;
+    }
+    data.iter()
+        .position(|byte| *byte == b'M' || *byte == b'm')
+        .map(|end| end + 1)
 }
 
 fn decode_tui_keys(data: &[u8]) -> Vec<KeyEvent> {
@@ -4161,6 +4355,11 @@ fn decode_tui_keys(data: &[u8]) -> Vec<KeyEvent> {
     let mut i = 0;
 
     while i < data.len() {
+        if let Some(consumed) = sgr_mouse_sequence_len(&data[i..]) {
+            i += consumed;
+            continue;
+        }
+
         if let Some((key, consumed)) = decode_escape_key(&data[i..]) {
             keys.push(key);
             i += consumed;
@@ -4331,7 +4530,11 @@ fn expand_tilde(p: &Path) -> PathBuf {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut out = stdout();
-    crossterm::execute!(out, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        out,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     Ok(Terminal::new(CrosstermBackend::new(out))?)
 }
 
@@ -4339,6 +4542,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
         crossterm::terminal::LeaveAlternateScreen,
     )?;
     terminal.show_cursor()?;
@@ -4691,9 +4895,87 @@ mod tests {
 
     #[test]
     fn split_ssh_input_stops_before_switch_key() {
-        let (forward, switched) = split_ssh_input(b"ls\x1c", SWITCH_SEQ);
-        assert_eq!(forward, b"ls");
-        assert!(switched);
+        let action = split_ssh_input_actions(b"ls\x1c", SWITCH_SEQ, true);
+        assert_eq!(action.forward, b"ls");
+        assert!(action.switch);
+    }
+
+    #[test]
+    fn ssh_scroll_input_is_not_forwarded_to_remote() {
+        let action = split_ssh_input_actions(b"ls\x1b[5~\x1b[<64;10;4M", SWITCH_SEQ, true);
+
+        assert_eq!(action.forward, b"ls");
+        assert!(!action.switch);
+        assert_eq!(
+            action.scrolls,
+            vec![SshScrollAction::PageUp, SshScrollAction::Lines(3)]
+        );
+    }
+
+    #[test]
+    fn ssh_scroll_input_is_forwarded_when_scroll_capture_is_disabled() {
+        let bytes = b"\x1b[5~";
+        let action = split_ssh_input_actions(bytes, SWITCH_SEQ, false);
+
+        assert_eq!(action.forward, bytes);
+        assert!(action.scrolls.is_empty());
+    }
+
+    #[test]
+    fn ssh_mouse_selection_input_is_forwarded_when_capture_is_disabled() {
+        let bytes = b"\x1b[<0;2;2M\x1b[<32;5;2M\x1b[<0;5;2m";
+        let action = split_ssh_input_actions(bytes, SWITCH_SEQ, false);
+
+        assert_eq!(action.forward, bytes);
+        assert!(action.mouse.is_empty());
+    }
+
+    #[test]
+    fn ssh_non_scroll_mouse_input_is_not_forwarded_to_remote() {
+        let bytes = b"ls\x1b[<0;10;4M";
+        let action = split_ssh_input_actions(bytes, SWITCH_SEQ, true);
+
+        assert_eq!(action.forward, b"ls");
+        assert!(!action.switch);
+        assert!(action.scrolls.is_empty());
+    }
+
+    #[test]
+    fn ssh_mouse_drag_selection_is_not_forwarded_to_remote() {
+        let bytes = b"ls\x1b[<0;2;2M\x1b[<32;5;2M\x1b[<0;5;2m";
+        let action = split_ssh_input_actions(bytes, SWITCH_SEQ, true);
+
+        assert_eq!(action.forward, b"ls");
+        assert_eq!(
+            action.mouse,
+            vec![
+                SshMouseAction::Start { column: 0, line: 0 },
+                SshMouseAction::Update { column: 3, line: 0 },
+                SshMouseAction::End { column: 3, line: 0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn ssh_mouse_selection_returns_selected_text_on_release() {
+        let mut app = app_with(vec![]);
+        let mut emulator = TerminalEmulator::new(10, 3);
+        emulator.process(b"alpha\r\nbeta\r\ngamma");
+        app.terminal_emulator = Some(emulator);
+
+        assert_eq!(
+            app.apply_ssh_mouse_action(SshMouseAction::Start { column: 1, line: 0 }),
+            None
+        );
+        assert_eq!(
+            app.apply_ssh_mouse_action(SshMouseAction::Update { column: 3, line: 1 }),
+            None
+        );
+        assert_eq!(
+            app.apply_ssh_mouse_action(SshMouseAction::End { column: 3, line: 1 })
+                .as_deref(),
+            Some("lpha\nbeta")
+        );
     }
 
     #[test]
