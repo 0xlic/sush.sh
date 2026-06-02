@@ -208,7 +208,7 @@ fn resume_offset_for_download(total_bytes: u64, existing_size: Option<u64>) -> u
 
 fn resume_offset_for_upload(total_bytes: u64, existing_size: Option<u64>) -> u64 {
     match existing_size {
-        Some(size) if size <= total_bytes => size,
+        Some(size) if size < total_bytes => size,
         _ => 0,
     }
 }
@@ -807,6 +807,11 @@ mod tests {
     #[test]
     fn upload_resume_uses_existing_remote_partial_size() {
         assert_eq!(resume_offset_for_upload(100, Some(40)), 40);
+    }
+
+    #[test]
+    fn upload_resume_resets_when_existing_remote_has_full_size() {
+        assert_eq!(resume_offset_for_upload(100, Some(100)), 0);
     }
 
     #[test]
