@@ -89,7 +89,7 @@ curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.
 
 ```sh
 # 安装指定版本
-curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.1.0
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.2.0
 
 # 安装到自定义目录
 curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | SUSH_INSTALL_DIR=/usr/local/bin sh

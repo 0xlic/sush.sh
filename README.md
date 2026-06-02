@@ -92,7 +92,7 @@ The installer detects macOS or Linux plus CPU architecture, downloads the matchi
 
 ```sh
 # Install a specific version
-curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.1.0
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.2.0
 
 # Install to a custom directory
 curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | SUSH_INSTALL_DIR=/usr/local/bin sh
