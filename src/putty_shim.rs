@@ -234,6 +234,7 @@ pub fn launch_terminal(sush_exe: &Path, args: &[String]) -> Result<()> {
     }
 }
 
+#[cfg(any(test, windows))]
 pub fn terminal_launch_candidates(sush_exe: &Path, args: &[String]) -> Vec<Vec<String>> {
     let compat_args = std::iter::once("--putty-compatible".to_string())
         .chain(args.iter().cloned())
