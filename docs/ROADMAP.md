@@ -82,6 +82,18 @@
 - [x] SFTP 界面支持当前列表模糊搜索
 - [x] SFTP 界面支持 goto 跳转目录
 
+## v1.2.0 — 发布与分发体验增强
+
+目标：降低新用户安装、升级和验证二进制的成本，同时让发布流程更可检查、更少依赖人工记忆。
+
+- [ ] 发布后验证脚本：检查 GitHub Release、六平台产物和 checksum 是否齐全
+- [ ] CI 增加 `cargo check`，与本地发布验证清单保持一致
+- [ ] Release workflow 增加 tag 与 `Cargo.toml` version 一致性检查
+- [ ] README 中英文补充安装、升级和 checksum 校验说明
+- [ ] Homebrew 安装方案：优先生成 formula 草稿，后续再决定是否维护 tap
+- [ ] `curl | sh` 安装脚本：按系统与架构自动选择 GitHub Release asset
+- [ ] 新增 `docs/requirements/v1.2.md`，明确发布与分发增强的验收规则
+
 ## 长期愿景（v1.x+）
 
 以下是差异化方向，不承诺时间线，按价值优先级排列：
