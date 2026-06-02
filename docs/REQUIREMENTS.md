@@ -9,6 +9,8 @@
 - `v0.2` 及后续版本记录相对于前一版本的新增或调整需求
 - `v1.0` 记录稳定发布阶段的验收要求
 - `v1.1` 记录终端 scrollback、文本复制和 SFTP 导航体验增强
+- `v1.2` 记录发布与分发体验增强
+- `v1.3` 记录 PuTTY 堡垒机调用兼容层 MVP
 
 `docs/REQUIREMENTS.md` 继续保留为入口索引，不再承载完整需求正文。
 
@@ -26,6 +28,8 @@
 | v0.8 | [v0.8](requirements/v0.8.md) | 高级网络功能 |
 | v1.0 | [v1.0](requirements/v1.0.md) | 稳定发布 |
 | v1.1 | [v1.1](requirements/v1.1.md) | 终端与 SFTP 体验增强 |
+| v1.2 | [v1.2](requirements/v1.2.md) | 发布与分发体验增强 |
+| v1.3 | [v1.3](requirements/v1.3.md) | PuTTY 堡垒机调用兼容层 MVP |
 
 ## 使用约定
 
