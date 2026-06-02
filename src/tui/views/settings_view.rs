@@ -48,10 +48,7 @@ pub fn render(f: &mut Frame, status: &PuttyShimStatus, metadata: &PuttyCompatMet
         .enumerate()
         .map(|(index, line)| {
             if index == 0 {
-                Line::from(Span::styled(
-                    line,
-                    Style::default().fg(Color::Cyan),
-                ))
+                Line::from(Span::styled(line, Style::default().fg(Color::Cyan)))
             } else {
                 Line::from(line)
             }
@@ -86,7 +83,11 @@ mod tests {
 
         let lines = settings_lines(&status, &metadata);
 
-        assert!(lines.iter().any(|line| line.contains("PuTTY compatibility launcher")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("PuTTY compatibility launcher"))
+        );
         assert!(lines.iter().any(|line| line.contains("not supported")));
         assert!(lines.iter().any(|line| line.contains("Next")));
     }

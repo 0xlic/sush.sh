@@ -255,7 +255,9 @@ mod tests {
             secret_save_failures: vec![],
             putty_compat: PuttyCompatMetadata {
                 enabled: true,
-                shim_path: Some(PathBuf::from("C:/Users/me/.config/sush/putty-compat/putty.exe")),
+                shim_path: Some(PathBuf::from(
+                    "C:/Users/me/.config/sush/putty-compat/putty.exe",
+                )),
                 sush_exe_path: Some(PathBuf::from("C:/Tools/sush.exe")),
                 last_error: None,
             },
@@ -271,7 +273,9 @@ mod tests {
         assert!(loaded.metadata.putty_compat.enabled);
         assert_eq!(
             loaded.metadata.putty_compat.shim_path,
-            Some(PathBuf::from("C:/Users/me/.config/sush/putty-compat/putty.exe"))
+            Some(PathBuf::from(
+                "C:/Users/me/.config/sush/putty-compat/putty.exe"
+            ))
         );
         assert_eq!(
             loaded.metadata.putty_compat.sush_exe_path,

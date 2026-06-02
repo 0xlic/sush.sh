@@ -190,7 +190,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(launch.identity_file, Some(PathBuf::from("~/.ssh/id_ed25519")));
+        assert_eq!(
+            launch.identity_file,
+            Some(PathBuf::from("~/.ssh/id_ed25519"))
+        );
         assert_eq!(launch.temporary_password.as_deref(), Some("secret"));
     }
 
@@ -251,6 +254,9 @@ mod tests {
         assert_eq!(host.alias, "deploy@prod.example.com");
         assert_eq!(host.hostname, "prod.example.com");
         assert_eq!(host.user, "deploy");
-        assert_eq!(host.identity_files, vec![PathBuf::from("~/.ssh/id_ed25519")]);
+        assert_eq!(
+            host.identity_files,
+            vec![PathBuf::from("~/.ssh/id_ed25519")]
+        );
     }
 }

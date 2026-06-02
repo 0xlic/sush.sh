@@ -84,10 +84,7 @@ pub fn status_for_platform(
     let next_step = if enabled {
         format!(
             "Configure your bastion client PuTTY path to {}.",
-            shim_path
-                .as_ref()
-                .unwrap_or(&expected_path)
-                .display()
+            shim_path.as_ref().unwrap_or(&expected_path).display()
         )
     } else {
         "Press Space to install the sush-managed putty.exe shim.".into()
@@ -105,9 +102,8 @@ pub fn status_for_platform(
 pub fn enable(config_dir: &Path, metadata: &mut PuttyCompatMetadata) -> Result<PuttyShimStatus> {
     if current_platform() != Platform::Windows {
         metadata.enabled = false;
-        metadata.last_error = Some(
-            "PuTTY shim automatic installation is only supported on Windows.".into(),
-        );
+        metadata.last_error =
+            Some("PuTTY shim automatic installation is only supported on Windows.".into());
         return Ok(status(metadata, config_dir));
     }
 
@@ -120,7 +116,8 @@ pub fn enable(config_dir: &Path, metadata: &mut PuttyCompatMetadata) -> Result<P
         );
     }
 
-    let sush_exe_path = std::env::current_exe().context("failed to locate current sush executable")?;
+    let sush_exe_path =
+        std::env::current_exe().context("failed to locate current sush executable")?;
     if let Some(parent) = shim_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -243,12 +240,21 @@ pub fn terminal_launch_candidates(sush_exe: &Path, args: &[String]) -> Vec<Vec<S
 
     vec![
         std::iter::once("wt.exe".to_string())
-            .chain(["new-tab".to_string(), "--title".to_string(), "sush".to_string()])
+            .chain([
+                "new-tab".to_string(),
+                "--title".to_string(),
+                "sush".to_string(),
+            ])
             .chain(std::iter::once(sush.clone()))
             .chain(compat_args.clone())
             .collect(),
         std::iter::once("cmd.exe".to_string())
-            .chain(["/C".to_string(), "start".to_string(), "sush".to_string(), sush])
+            .chain([
+                "/C".to_string(),
+                "start".to_string(),
+                "sush".to_string(),
+                sush,
+            ])
             .chain(compat_args)
             .collect(),
     ]
@@ -305,7 +311,9 @@ mod tests {
     fn putty_shim_status_reports_windows_next_step() {
         let metadata = crate::config::store::PuttyCompatMetadata {
             enabled: true,
-            shim_path: Some(std::path::PathBuf::from("C:/Users/me/.config/sush/putty-compat/putty.exe")),
+            shim_path: Some(std::path::PathBuf::from(
+                "C:/Users/me/.config/sush/putty-compat/putty.exe",
+            )),
             sush_exe_path: Some(std::path::PathBuf::from("C:/Tools/sush.exe")),
             last_error: None,
         };
@@ -328,7 +336,10 @@ mod tests {
         let encoded = encode_shim_config(&config).unwrap();
         let decoded = decode_shim_config(&encoded).unwrap();
 
-        assert_eq!(decoded.sush_exe_path, std::path::PathBuf::from("C:/Tools/sush.exe"));
+        assert_eq!(
+            decoded.sush_exe_path,
+            std::path::PathBuf::from("C:/Tools/sush.exe")
+        );
     }
 
     #[test]
@@ -338,7 +349,10 @@ mod tests {
 
         let current_status = status(&metadata, dir.path());
 
-        assert_eq!(current_status.supported, current_platform() == Platform::Windows);
+        assert_eq!(
+            current_status.supported,
+            current_platform() == Platform::Windows
+        );
     }
 
     #[test]
@@ -350,7 +364,12 @@ mod tests {
 
         if current_platform() == Platform::Windows {
             assert!(enabled_status.enabled);
-            assert!(metadata.shim_path.as_ref().is_some_and(|path| path.exists()));
+            assert!(
+                metadata
+                    .shim_path
+                    .as_ref()
+                    .is_some_and(|path| path.exists())
+            );
         } else {
             assert!(!enabled_status.enabled);
             assert!(metadata.last_error.is_some());
@@ -363,7 +382,9 @@ mod tests {
 
     #[test]
     fn putty_direct_shim_detection_matches_putty_exe_name() {
-        assert!(is_putty_shim_path(std::path::Path::new("C:/Tools/putty.exe")));
+        assert!(is_putty_shim_path(std::path::Path::new(
+            "C:/Tools/putty.exe"
+        )));
         assert!(is_putty_shim_path(std::path::Path::new("putty")));
         assert!(!is_putty_shim_path(std::path::Path::new("sush.exe")));
     }
@@ -371,11 +392,14 @@ mod tests {
     #[test]
     fn putty_direct_terminal_command_adds_compat_marker() {
         let args = vec!["-ssh".to_string(), "deploy@prod.example.com".to_string()];
-        let candidates = terminal_launch_candidates(std::path::Path::new("C:/Tools/sush.exe"), &args);
+        let candidates =
+            terminal_launch_candidates(std::path::Path::new("C:/Tools/sush.exe"), &args);
 
         assert!(candidates.iter().any(|candidate| {
             candidate.iter().any(|part| part == "--putty-compatible")
-                && candidate.iter().any(|part| part == "deploy@prod.example.com")
+                && candidate
+                    .iter()
+                    .any(|part| part == "deploy@prod.example.com")
         }));
     }
 }
