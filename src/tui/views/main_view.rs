@@ -11,6 +11,22 @@ use crate::tui::widgets::host_list::HostList;
 use crate::tui::widgets::search_input::SearchInput;
 use crate::tui::widgets::status_bar::StatusBar;
 
+pub fn default_hints() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("/", "Search"),
+        ("Enter", "SSH"),
+        ("s", "SFTP"),
+        ("p", "Forwards"),
+        (",", "Settings"),
+        ("n", "New"),
+        ("e", "Edit"),
+        ("d", "Delete"),
+        ("i", "Import"),
+        ("f", "Folders"),
+        ("q", "Quit"),
+    ]
+}
+
 pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -108,18 +124,7 @@ pub fn render(f: &mut Frame, app: &App, list_state: &mut ListState) {
             ("q", "Quit"),
         ]
     } else {
-        &[
-            ("/", "Search"),
-            ("Enter", "SSH"),
-            ("s", "SFTP"),
-            ("p", "Forwards"),
-            ("n", "New"),
-            ("e", "Edit"),
-            ("d", "Delete"),
-            ("i", "Import"),
-            ("f", "Folders"),
-            ("q", "Quit"),
-        ]
+        default_hints()
     };
     f.render_widget(
         StatusBar {
@@ -246,5 +251,10 @@ mod tests {
             selection_highlight_style(),
             Style::default().add_modifier(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn default_hints_include_settings_entry() {
+        assert!(default_hints().contains(&(",", "Settings")));
     }
 }

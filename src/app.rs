@@ -35,7 +35,9 @@ use crate::tui::views::folder_view::{
     level_1_paths, parent_path,
 };
 use crate::tui::views::import_view::{self, ImportViewState};
-use crate::tui::views::{main_view, password_dialog::PasswordDialog, sftp_view, ssh_view};
+use crate::tui::views::{
+    main_view, password_dialog::PasswordDialog, settings_view, sftp_view, ssh_view,
+};
 use crate::tui::widgets::confirm_dialog::{ChoiceDialog, ConfirmDialog};
 use crate::tui::widgets::status_bar::TransferBadge;
 use crate::utils::open;
@@ -54,6 +56,7 @@ pub enum AppMode {
     Sftp,
     Edit,
     ImportSshConfig,
+    Settings,
     #[allow(dead_code)]
     FolderView,
     ForwardingManager,
@@ -908,7 +911,7 @@ impl App {
         }
 
         match self.mode {
-            AppMode::Main | AppMode::Sftp | AppMode::ForwardingManager => {
+            AppMode::Main | AppMode::Sftp | AppMode::ForwardingManager | AppMode::Settings => {
                 for key in decode_tui_keys(&data) {
                     self.handle_key(key);
                 }
@@ -965,6 +968,7 @@ impl App {
             AppMode::Main => self.handle_main_key(k),
             AppMode::Sftp => self.handle_sftp_key(k),
             AppMode::ForwardingManager => self.handle_forwarding_key(k),
+            AppMode::Settings => self.handle_settings_key(k),
             AppMode::Ssh | AppMode::Edit | AppMode::ImportSshConfig | AppMode::FolderView => {}
         }
     }
@@ -1070,6 +1074,9 @@ impl App {
                 self.forward_edit = None;
                 self.mode = AppMode::ForwardingManager;
             }
+            (KeyCode::Char(','), KeyModifiers::NONE) => {
+                self.mode = AppMode::Settings;
+            }
             _ => {}
         }
     }
@@ -1110,6 +1117,55 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_settings_key(&mut self, k: KeyEvent) {
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc | KeyCode::Char('q'), _) => {
+                self.mode = AppMode::Main;
+            }
+            (KeyCode::Char(' ') | KeyCode::Enter, KeyModifiers::NONE) => {
+                self.toggle_putty_compat_launcher();
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_putty_compat_launcher(&mut self) {
+        let config_dir = self.app_config_dir();
+        let result = if self.metadata.putty_compat.enabled {
+            crate::putty_shim::disable(&config_dir, &mut self.metadata.putty_compat)
+        } else {
+            crate::putty_shim::enable(&config_dir, &mut self.metadata.putty_compat)
+        };
+
+        match result {
+            Ok(status) => self.set_status(status.message),
+            Err(error) => {
+                self.metadata.putty_compat.enabled = false;
+                self.metadata.putty_compat.last_error = Some(error.to_string());
+                self.set_status(format!("PuTTY compatibility update failed: {error}"));
+            }
+        }
+        self.save_hosts_to_disk();
+    }
+
+    fn app_config_dir(&self) -> PathBuf {
+        #[cfg(test)]
+        {
+            self.test_config_dir
+                .as_ref()
+                .map(|dir| dir.path().to_path_buf())
+                .unwrap_or_else(store::config_dir)
+        }
+        #[cfg(not(test))]
+        {
+            store::config_dir()
+        }
+    }
+
+    pub fn putty_shim_status(&self) -> crate::putty_shim::PuttyShimStatus {
+        crate::putty_shim::status(&self.metadata.putty_compat, &self.app_config_dir())
     }
 
     fn handle_main_key_search(&mut self, k: KeyEvent) {
@@ -4116,6 +4172,10 @@ impl App {
                     crate::tui::views::forward_edit::render(f, edit);
                 }
             }
+            AppMode::Settings => {
+                let status = self.putty_shim_status();
+                settings_view::render(f, &status, &self.metadata.putty_compat);
+            }
             AppMode::FolderView => {
                 if let Some(fv) = &self.folder_view_state {
                     let probe: Option<Option<bool>> = if self.probe_result.is_some() {
@@ -4825,6 +4885,41 @@ mod tests {
 
         assert_eq!(app.mode, AppMode::ForwardingManager);
         assert!(app.forwarding_state.is_some());
+    }
+
+    #[test]
+    fn comma_key_opens_settings_view() {
+        let mut app = app_with(vec![mk("web")]);
+
+        app.handle_main_key_hostlist(KeyEvent::from(KeyCode::Char(',')));
+
+        assert_eq!(app.mode, AppMode::Settings);
+    }
+
+    #[test]
+    fn esc_in_settings_returns_to_main() {
+        let mut app = app_with(vec![mk("web")]);
+        app.mode = AppMode::Settings;
+
+        app.handle_settings_key(KeyEvent::from(KeyCode::Esc));
+
+        assert_eq!(app.mode, AppMode::Main);
+    }
+
+    #[test]
+    fn space_in_settings_updates_putty_compat_metadata() {
+        let mut app = app_with(vec![mk("web")]);
+        app.mode = AppMode::Settings;
+
+        app.handle_settings_key(KeyEvent::from(KeyCode::Char(' ')));
+
+        if crate::putty_shim::current_platform() == crate::putty_shim::Platform::Windows {
+            assert!(app.metadata.putty_compat.enabled);
+            assert!(app.metadata.putty_compat.shim_path.is_some());
+        } else {
+            assert!(!app.metadata.putty_compat.enabled);
+            assert!(app.metadata.putty_compat.last_error.is_some());
+        }
     }
 
     #[test]
