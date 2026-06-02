@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod putty_args;
 mod sftp;
 mod ssh;
 mod tui;
