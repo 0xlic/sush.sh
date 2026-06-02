@@ -22,12 +22,26 @@ pub struct Metadata {
     pub import_prompted: bool,
     #[serde(default)]
     pub secret_save_failures: Vec<SecretSaveFailure>,
+    #[serde(default)]
+    pub putty_compat: PuttyCompatMetadata,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct SecretSaveFailure {
     pub account: String,
     pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+pub struct PuttyCompatMetadata {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub shim_path: Option<PathBuf>,
+    #[serde(default)]
+    pub sush_exe_path: Option<PathBuf>,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 impl Metadata {
@@ -103,6 +117,7 @@ pub fn save_to(
                 ssh_config_hash: ssh_config_hash.to_string(),
                 import_prompted,
                 secret_save_failures: vec![],
+                putty_compat: PuttyCompatMetadata::default(),
             },
             hosts: hosts.to_vec(),
         },
@@ -197,6 +212,7 @@ mod tests {
                 account: "host-1:login_password".into(),
                 reason: "backend unavailable".into(),
             }],
+            ..Metadata::default()
         };
 
         let store = HostStore {
@@ -216,6 +232,51 @@ mod tests {
         std::fs::write(&path, "[metadata]\nssh_config_hash = \"abc\"\n").unwrap();
         let loaded = load_store(&path).unwrap();
         assert!(loaded.metadata.secret_save_failures.is_empty());
+    }
+
+    #[test]
+    fn putty_compat_defaults_to_disabled_on_old_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, "[metadata]\nssh_config_hash = \"abc\"\n").unwrap();
+        let loaded = load_store(&path).unwrap();
+        assert!(!loaded.metadata.putty_compat.enabled);
+        assert!(loaded.metadata.putty_compat.shim_path.is_none());
+    }
+
+    #[test]
+    fn putty_compat_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hosts.toml");
+
+        let metadata = Metadata {
+            ssh_config_hash: "abc".into(),
+            import_prompted: true,
+            secret_save_failures: vec![],
+            putty_compat: PuttyCompatMetadata {
+                enabled: true,
+                shim_path: Some(PathBuf::from("C:/Users/me/.config/sush/putty-compat/putty.exe")),
+                sush_exe_path: Some(PathBuf::from("C:/Tools/sush.exe")),
+                last_error: None,
+            },
+        };
+
+        let store = HostStore {
+            metadata,
+            hosts: vec![],
+        };
+
+        save_store(&path, &store).unwrap();
+        let loaded = load_store(&path).unwrap();
+        assert!(loaded.metadata.putty_compat.enabled);
+        assert_eq!(
+            loaded.metadata.putty_compat.shim_path,
+            Some(PathBuf::from("C:/Users/me/.config/sush/putty-compat/putty.exe"))
+        );
+        assert_eq!(
+            loaded.metadata.putty_compat.sush_exe_path,
+            Some(PathBuf::from("C:/Tools/sush.exe"))
+        );
     }
 
     #[test]

@@ -4635,6 +4635,7 @@ mod tests {
                 account: "host-1:login_password".into(),
                 reason: "system keyring is unavailable".into(),
             }],
+            ..Metadata::default()
         };
         app.secret_store = SecretStore::new(Box::new(FakeBackend::available()));
         app
