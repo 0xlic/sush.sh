@@ -76,19 +76,19 @@ sush-aarch64-unknown-linux-gnu.tar.xz
 sush-x86_64-unknown-linux-gnu.tar.xz
 sush-i686-pc-windows-msvc.zip
 sush-x86_64-pc-windows-msvc.zip
-sush.sha256
+sha256.sum
 EOF
 }
 
 write_checksum() {
   state_dir="$1"
-  cat > "$state_dir/sush.sha256" <<EOF
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  sush-aarch64-apple-darwin.tar.xz
-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  sush-x86_64-apple-darwin.tar.xz
-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  sush-aarch64-unknown-linux-gnu.tar.xz
-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  sush-x86_64-unknown-linux-gnu.tar.xz
-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee  sush-i686-pc-windows-msvc.zip
-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  sush-x86_64-pc-windows-msvc.zip
+  cat > "$state_dir/sha256.sum" <<EOF
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa *sush-aarch64-apple-darwin.tar.xz
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *sush-x86_64-apple-darwin.tar.xz
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc *sush-aarch64-unknown-linux-gnu.tar.xz
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd *sush-x86_64-unknown-linux-gnu.tar.xz
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee *sush-i686-pc-windows-msvc.zip
+ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *sush-x86_64-pc-windows-msvc.zip
 EOF
 }
 
@@ -133,5 +133,5 @@ grep -F "release v9.9.9 not found in owner/repo" "$state_dir/out" > /dev/null
 run_failure_contains "missing-asset" "missing release asset for x86_64-unknown-linux-gnu" \
   sh -c 'grep -v "x86_64-unknown-linux-gnu" "$0/assets.txt" > "$0/assets.new"; mv "$0/assets.new" "$0/assets.txt"'
 
-run_failure_contains "missing-checksum-entry" "checksum file sush.sha256 does not include sush-i686-pc-windows-msvc.zip" \
-  sh -c 'grep -v "i686-pc-windows-msvc" "$0/sush.sha256" > "$0/sush.sha256.new"; mv "$0/sush.sha256.new" "$0/sush.sha256"'
+run_failure_contains "missing-checksum-entry" "checksum file sha256.sum does not include sush-i686-pc-windows-msvc.zip" \
+  sh -c 'grep -v "i686-pc-windows-msvc" "$0/sha256.sum" > "$0/sha256.sum.new"; mv "$0/sha256.sum.new" "$0/sha256.sum"'

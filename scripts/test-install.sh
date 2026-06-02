@@ -48,12 +48,12 @@ fi
 printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 
 case "$url" in
-  *sush.sha256)
+  *sha256.sum)
     cat > "$output" <<CHECKSUM_EOF
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  sush-aarch64-apple-darwin.tar.xz
-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  sush-x86_64-apple-darwin.tar.xz
-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  sush-aarch64-unknown-linux-gnu.tar.xz
-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  sush-x86_64-unknown-linux-gnu.tar.xz
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa *sush-aarch64-apple-darwin.tar.xz
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *sush-x86_64-apple-darwin.tar.xz
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc *sush-aarch64-unknown-linux-gnu.tar.xz
+dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd *sush-x86_64-unknown-linux-gnu.tar.xz
 CHECKSUM_EOF
     ;;
   *)
@@ -186,17 +186,17 @@ run_install_with_env_version() {
 }
 
 curl_log=$(run_install "mac-latest" "Darwin" "arm64" "")
-grep -F "https://github.com/lichen/sush.sh/releases/latest/download/sush-aarch64-apple-darwin.tar.xz" "$curl_log" > /dev/null
-grep -F "https://github.com/lichen/sush.sh/releases/latest/download/sush.sha256" "$curl_log" > /dev/null
+grep -F "https://github.com/0xlic/sush.sh/releases/latest/download/sush-aarch64-apple-darwin.tar.xz" "$curl_log" > /dev/null
+grep -F "https://github.com/0xlic/sush.sh/releases/latest/download/sha256.sum" "$curl_log" > /dev/null
 
 curl_log=$(run_install "linux-version" "Linux" "x86_64" "v1.2.0")
-grep -F "https://github.com/lichen/sush.sh/releases/download/v1.2.0/sush-x86_64-unknown-linux-gnu.tar.xz" "$curl_log" > /dev/null
+grep -F "https://github.com/0xlic/sush.sh/releases/download/v1.2.0/sush-x86_64-unknown-linux-gnu.tar.xz" "$curl_log" > /dev/null
 
 curl_log=$(run_install "linux-env-version" "Linux" "aarch64" "")
 grep -F "sush-aarch64-unknown-linux-gnu.tar.xz" "$curl_log" > /dev/null
 
 curl_log=$(run_install_with_env_version "env-version" "Darwin" "x86_64" "1.2.0")
-grep -F "https://github.com/lichen/sush.sh/releases/download/v1.2.0/sush-x86_64-apple-darwin.tar.xz" "$curl_log" > /dev/null
+grep -F "https://github.com/0xlic/sush.sh/releases/download/v1.2.0/sush-x86_64-apple-darwin.tar.xz" "$curl_log" > /dev/null
 
 unsupported_dir="$tmp_dir/unsupported"
 mkdir -p "$unsupported_dir"

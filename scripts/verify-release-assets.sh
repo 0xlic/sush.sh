@@ -2,7 +2,7 @@
 set -eu
 
 tag="${1:-}"
-repo="${2:-lichen/sush.sh}"
+repo="${2:-0xlic/sush.sh}"
 
 if [ -z "$tag" ]; then
   echo "error: missing release tag" >&2
@@ -52,7 +52,10 @@ for target in $targets; do
 "
 done
 
-checksum_asset=$(printf '%s\n' "$assets" | grep -Ei 'sha256|checksum' | head -n 1 || true)
+checksum_asset=$(printf '%s\n' "$assets" | grep -F 'sha256.sum' | head -n 1 || true)
+if [ -z "$checksum_asset" ]; then
+  checksum_asset=$(printf '%s\n' "$assets" | grep -Ei 'sha256|checksum' | head -n 1 || true)
+fi
 if [ -z "$checksum_asset" ]; then
   echo "error: missing checksum asset in release $tag" >&2
   exit 1

@@ -82,9 +82,35 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 
 ## Install
 
-### From binary (recommended)
+### Install script (macOS / Linux)
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/lichen/sush.sh/releases):
+```sh
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh
+```
+
+The installer detects macOS or Linux plus CPU architecture, downloads the matching GitHub Release asset, verifies it against `sha256.sum`, and installs `sush` to `$HOME/.local/bin`.
+
+```sh
+# Install a specific version
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.1.0
+
+# Install to a custom directory
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | SUSH_INSTALL_DIR=/usr/local/bin sh
+```
+
+Run the same command again to upgrade to the latest stable release.
+
+### Homebrew formula draft
+
+A Homebrew formula draft is available at `packaging/homebrew/sush.rb`. It uses the macOS release assets and pinned sha256 values from the current stable release.
+
+```sh
+brew install --formula packaging/homebrew/sush.rb
+```
+
+### From binary
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/0xlic/sush.sh/releases):
 
 | Platform       | File                        |
 |----------------|-----------------------------|
@@ -97,15 +123,24 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 ```sh
 # macOS / Linux
-chmod +x sush-*
-mv sush-* /usr/local/bin/sush
+tar -xf sush-*.tar.xz
+chmod +x sush
+mv sush /usr/local/bin/sush
 sush
 ```
+
+To verify a manual download, download `sha256.sum` from the same release and run:
+
+```sh
+shasum -a 256 -c sha256.sum --ignore-missing
+```
+
+On Linux, `sha256sum -c sha256.sum --ignore-missing` is also supported.
 
 ### From source
 
 ```sh
-git clone https://github.com/lichen/sush.sh
+git clone https://github.com/0xlic/sush.sh
 cd sush.sh
 cargo build --release
 ./target/release/sush
@@ -215,6 +250,7 @@ For normal files, repeated downloads resume from the existing local target size 
 | **v0.8** ✅ | Port forwarding manager · single-hop ProxyJump · SOCKS5 proxy · tunnel status view |
 | **v1.0** ✅ | macOS smoke test · GitHub Actions binary releases · doc consistency |
 | **v1.1** ✅ | SSH scrollback · mouse selection copy · SFTP parent navigation · list search · goto path |
+| **v1.2** ✅ | Release verification · version guard · install script · Homebrew formula draft · checksum docs |
 
 ---
 

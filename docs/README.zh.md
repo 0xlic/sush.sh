@@ -79,9 +79,35 @@
 
 ## 安装
 
-### 下载二进制（推荐）
+### 安装脚本（macOS / Linux）
 
-从 [GitHub Releases](https://github.com/lichen/sush.sh/releases) 下载对应平台的文件：
+```sh
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh
+```
+
+安装脚本会自动识别 macOS / Linux 和 CPU 架构，下载匹配的 GitHub Release asset，使用 `sha256.sum` 校验后安装到 `$HOME/.local/bin`。
+
+```sh
+# 安装指定版本
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.1.0
+
+# 安装到自定义目录
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | SUSH_INSTALL_DIR=/usr/local/bin sh
+```
+
+再次运行同一条命令即可升级到最新稳定版本。
+
+### Homebrew formula 草稿
+
+Homebrew formula 草稿位于 `packaging/homebrew/sush.rb`，使用当前稳定版的 macOS release asset 和固定 sha256。
+
+```sh
+brew install --formula packaging/homebrew/sush.rb
+```
+
+### 下载二进制
+
+从 [GitHub Releases](https://github.com/0xlic/sush.sh/releases) 下载对应平台的文件：
 
 | 平台 | 文件 |
 |------|------|
@@ -94,15 +120,24 @@
 
 ```sh
 # macOS / Linux
-chmod +x sush-*
-mv sush-* /usr/local/bin/sush
+tar -xf sush-*.tar.xz
+chmod +x sush
+mv sush /usr/local/bin/sush
 sush
 ```
+
+手动下载后，可以从同一个 Release 下载 `sha256.sum` 并执行：
+
+```sh
+shasum -a 256 -c sha256.sum --ignore-missing
+```
+
+Linux 也可以使用 `sha256sum -c sha256.sum --ignore-missing`。
 
 ### 从源码构建
 
 ```sh
-git clone https://github.com/lichen/sush.sh
+git clone https://github.com/0xlic/sush.sh
 cd sush.sh
 cargo build --release
 ./target/release/sush
@@ -228,6 +263,7 @@ SFTP 多选模式下，本地和远程面板分别维护各自的选中集合。
 | **v0.8** ✅ | 端口转发管理 · 单跳 ProxyJump · SOCKS5 代理 · 转发状态视图 |
 | **v1.0** ✅ | macOS smoke test · GitHub Actions 六平台二进制发布 · 文档一致性 |
 | **v1.1** ✅ | SSH scrollback · 鼠标选中复制 · SFTP 返回上级 · 当前列表搜索 · goto 跳转 |
+| **v1.2** ✅ | 发布验证 · 版本一致性检查 · 安装脚本 · Homebrew formula 草稿 · checksum 文档 |
 
 ---
 

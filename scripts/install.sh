@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo="lichen/sush.sh"
+repo="0xlic/sush.sh"
 version="${1:-${SUSH_VERSION:-latest}}"
 install_dir="${SUSH_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -72,7 +72,18 @@ verify_checksum() {
   archive="$1"
   checksum_file="$2"
   asset_name="$(basename "$archive")"
-  expected="$(grep -F " $asset_name" "$checksum_file" | awk '{ print $1 }' | head -n 1 || true)"
+  expected="$(
+    awk -v name="$asset_name" '
+      {
+        candidate = $2
+        sub(/^\*/, "", candidate)
+        if (candidate == name) {
+          print $1
+          exit
+        }
+      }
+    ' "$checksum_file"
+  )"
 
   if [ -z "$expected" ]; then
     echo "error: checksum file does not include $asset_name" >&2
@@ -116,12 +127,12 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 archive="$tmp_dir/$asset"
-checksum_file="$tmp_dir/sush.sha256"
+checksum_file="$tmp_dir/sha256.sum"
 extract_dir="$tmp_dir/extract"
 mkdir -p "$extract_dir"
 
 curl -fsSL -o "$archive" "$base_url/$asset"
-curl -fsSL -o "$checksum_file" "$base_url/sush.sha256"
+curl -fsSL -o "$checksum_file" "$base_url/sha256.sum"
 
 verify_checksum "$archive" "$checksum_file"
 extract_archive "$archive" "$extract_dir"
