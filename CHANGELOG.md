@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.3.0] - 2026-06-02
+
+### Features
+
+- Parse putty ssh launch arguments
+- Manage putty compatibility shim state
+- Add settings view for putty compatibility
+- Launch putty direct ssh sessions
+
 ## [1.2.0] - 2026-06-02
 
 ### Features

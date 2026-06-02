@@ -73,6 +73,13 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 - A background daemon holds open connections so forwards survive after you exit sush
 - Status column shows `Running`, `Reconnecting`, `Error`, etc. in real time
 
+**PuTTY bastion compatibility**
+- Press `,` from the main view to open Settings
+- The PuTTY compatibility launcher is off by default and can only be enabled from Settings
+- On Windows, Settings installs a sush-managed `putty.exe` shim path for bastion clients that expect PuTTY
+- Bastion calls like `putty.exe -ssh -l user -P 2222 host` open a new local terminal and enter the SSH session directly
+- `-pw` is used only as an in-memory password for the current launch; it is not saved to config, keychain, history, or status text
+
 **Snappy**
 - Starts in under 200ms
 - Search responds in under 50ms
@@ -92,7 +99,7 @@ The installer detects macOS or Linux plus CPU architecture, downloads the matchi
 
 ```sh
 # Install a specific version
-curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.2.0
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.3.0
 
 # Install to a custom directory
 curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | SUSH_INSTALL_DIR=/usr/local/bin sh
@@ -171,6 +178,7 @@ On first launch, `sush` will ask whether to import from `~/.ssh/config`. You can
 | `i` | Import from `~/.ssh/config` |
 | `f` | Toggle folder sidebar |
 | `p` | Open port forwarding manager |
+| `,` | Open Settings |
 | `j` | Jump to folder (when folders are focused) |
 | `q` | Quit |
 
@@ -211,6 +219,12 @@ In SFTP multi-select mode, each pane keeps its own selection set. Press `Space` 
 Transfers now run through a single FIFO queue scoped to the current SSH connection. The bottom-right corner of Main, SSH, and SFTP shows a compact badge like `↑ 2/10 37%` or `↓ 2/10 37%`, so long-running transfers continue in the background without taking over the entire status line. Disconnecting the current connection clears the queue.
 
 For normal files, repeated downloads resume from the existing local target size when it is smaller than or equal to the remote source. Repeated uploads resume only when the remote target is smaller than the local source; if the remote target is already full-size or larger, `sush` restarts that file from zero. This first version does not add hash verification or cross-restart resume records.
+
+**Settings and PuTTY compatibility**
+
+Press `,` from the main view to open Settings. `PuTTY compatibility launcher` is disabled by default. On Windows, press `Space` in Settings to install a managed shim at `~/.config/sush/putty-compat/putty.exe`, then configure your bastion client to use that exact PuTTY path. Press `Space` again to disable the launcher and remove the shim files created by sush.
+
+The shim supports PuTTY SSH launch arguments `-ssh`, `-l user`, `-P port`, `-i keyfile`, `-pw password`, and `[user@]host`. Unsupported PuTTY modes such as saved sessions, telnet, raw, rlogin, serial, and port-forwarding options are rejected. macOS and Linux show platform guidance in Settings and do not install a Windows PuTTY shim.
 
 ---
 

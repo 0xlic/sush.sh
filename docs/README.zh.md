@@ -70,6 +70,13 @@
 - 支持单跳 ProxyJump，经跳板机建立转发
 - daemon 会显示规则状态，并在可重试错误时自动退避重连
 
+**PuTTY 堡垒机兼容层**
+- 主界面按 `,` 进入 Settings
+- PuTTY compatibility launcher 默认关闭，只能由用户在 Settings 中开启
+- Windows 上可安装 sush 自己管理的 `putty.exe` shim 路径，供堡垒机客户端配置为 PuTTY 路径
+- 堡垒机调用 `putty.exe -ssh -l user -P 2222 host` 时，会打开新的本地终端并直接进入 SSH 会话
+- `-pw` 只作为本次启动的内存临时密码，不保存到配置、钥匙串、历史或状态文本
+
 **快**
 - 启动时间 < 200ms
 - 搜索响应 < 50ms
@@ -89,7 +96,7 @@ curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.
 
 ```sh
 # 安装指定版本
-curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.2.0
+curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | sh -s -- v1.3.0
 
 # 安装到自定义目录
 curl -fsSL https://raw.githubusercontent.com/0xlic/sush.sh/main/scripts/install.sh | SUSH_INSTALL_DIR=/usr/local/bin sh
@@ -169,6 +176,7 @@ sush
 | `i` | 从 `~/.ssh/config` 导入 |
 | `f` | 显示/隐藏目录栏 |
 | `p` | 打开端口转发管理器 |
+| `,` | 打开 Settings |
 | `j` | 跳转目录（目录栏聚焦时） |
 | `q` | 退出 |
 
@@ -211,6 +219,12 @@ SFTP 多选模式下，本地和远程面板分别维护各自的选中集合。
 传输任务现在走当前 SSH 连接范围内的单一 FIFO 队列。主页、SSH、SFTP 三个界面的底部右侧都会显示紧凑 badge，例如 `↑ 2/10 37%` 或 `↓ 2/10 37%`；这样长任务可以在后台继续，而不会长期占满整条底栏。真正断开当前连接时，队列会被清空。
 
 普通文件现在支持最小版断点续传：再次下载同一路径时，若本地目标已存在且大小小于等于远程源文件，就从该字节偏移继续；再次上传时，只有远程目标小于本地源文件才续传，若远程目标已经等于完整大小或更大，则回退为从 0 重新传输。这一版不做哈希校验，也不做跨重启的续传记录。
+
+**Settings 与 PuTTY 兼容层**
+
+主界面按 `,` 打开 Settings。`PuTTY compatibility launcher` 默认关闭。Windows 上在 Settings 中按 `Space` 会安装受 sush 管理的 shim：`~/.config/sush/putty-compat/putty.exe`，然后把堡垒机客户端里的 PuTTY 路径配置为这个文件即可。再次按 `Space` 会关闭兼容层，并移除 sush 自己创建的 shim 文件。
+
+shim 支持 PuTTY SSH 启动参数：`-ssh`、`-l user`、`-P port`、`-i keyfile`、`-pw password` 和 `[user@]host`。不支持 saved session、telnet、raw、rlogin、serial 和端口转发参数。macOS / Linux 会在 Settings 中显示平台限制说明，不执行 Windows PuTTY shim 安装动作。
 
 ---
 

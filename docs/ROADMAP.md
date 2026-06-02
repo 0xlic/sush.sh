@@ -98,14 +98,14 @@
 
 目标：让用户在堡垒机网页完成授权后，通过堡垒机“调用 PuTTY”的本地客户端流程拉起 sush 窗口，并直接进入 SSH 会话。
 
-- [ ] 新增 Settings 入口，默认关闭 PuTTY compatibility launcher
-- [ ] Windows 支持安装/移除 `putty.exe` shim，供堡垒机配置为 PuTTY 路径
-- [ ] shim 被调用时弹出本地终端窗口并启动 sush
-- [ ] 支持解析 PuTTY SSH 常用参数：`-ssh`、`-l`、`-P`、`-i`、`-pw`、`[user@]host`
-- [ ] `-pw` 仅作为本次连接临时凭证，不保存到配置、日志或系统钥匙串
-- [ ] 启动后直接进入 SSH 终端模式，保留 `Ctrl-\` 切换 SFTP 能力
-- [ ] macOS / Linux 在 Settings 中显示当前 PuTTY shim 不支持或仅支持手动说明，不做默认安装动作
-- [ ] 新增 `docs/requirements/v1.3.md`，明确兼容层范围、平台行为与安全边界
+- [x] 新增 Settings 入口，默认关闭 PuTTY compatibility launcher
+- [x] Windows 支持安装/移除 `putty.exe` shim，供堡垒机配置为 PuTTY 路径
+- [x] shim 被调用时弹出本地终端窗口并启动 sush
+- [x] 支持解析 PuTTY SSH 常用参数：`-ssh`、`-l`、`-P`、`-i`、`-pw`、`[user@]host`
+- [x] `-pw` 仅作为本次连接临时凭证，不保存到配置、日志或系统钥匙串
+- [x] 启动后直接进入 SSH 终端模式，保留 `Ctrl-\` 切换 SFTP 能力
+- [x] macOS / Linux 在 Settings 中显示当前 PuTTY shim 不支持或仅支持手动说明，不做默认安装动作
+- [x] 新增 `docs/requirements/v1.3.md`，明确兼容层范围、平台行为与安全边界
 
 ## 长期愿景（v1.x+）
 

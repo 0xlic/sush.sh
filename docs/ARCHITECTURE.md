@@ -77,6 +77,8 @@
 src/
 ├── main.rs              # 入口，初始化 tokio + TUI
 ├── app.rs               # App 状态机，模式管理
+├── putty_args.rs        # PuTTY SSH 启动参数解析（v1.3 引入）
+├── putty_shim.rs        # PuTTY compatibility launcher shim 管理（v1.3 引入）
 ├── config/
 │   ├── mod.rs           # 配置模块入口
 │   ├── host.rs          # Host 数据结构
@@ -310,6 +312,29 @@ Linux 若没有可用的 Secret Service：
 - 禁止保存凭证
 - 允许本次临时输入继续连接
 - 下次输入时提示安装 `gnome-keyring` 或 `kwallet`
+
+## v1.3 PuTTY 堡垒机调用兼容层
+
+v1.3 新增 PuTTY compatibility launcher，默认关闭，只能从 Settings 中启用或关闭。
+
+- `putty_args.rs` 解析 PuTTY SSH 启动参数：`-ssh`、`-l`、`-P`、`-i`、`-pw`、`[user@]host`。不支持的 PuTTY 参数会明确拒绝，避免被误解释为 host。
+- `putty_shim.rs` 负责 Settings 中的 shim 状态展示，以及 Windows 下安装/移除 sush 自己管理的 `putty.exe` shim。
+- Settings 状态持久化在 `HostStore.metadata.putty_compat` 中，只记录是否启用、受管 shim 路径、真实 sush 路径和最近一次错误；不会保存堡垒机传入的连接密码。
+
+Windows shim 安装策略：
+
+1. 在 `~/.config/sush/putty-compat/` 下创建受管目录。
+2. 将当前 sush 可执行文件复制为 `putty.exe`。
+3. 写入同目录 `putty-shim.toml`，记录真实 sush 可执行文件路径。
+4. 当该 `putty.exe` 被堡垒机调用时，shim 读取 sidecar 配置，优先用 `wt.exe` 打开新终端运行 `sush --putty-compatible ...`；如果 Windows Terminal 不可用，则回退到 `cmd.exe /C start`。
+
+PuTTY direct 启动路径：
+
+1. `main.rs` 识别 `--putty-compatible` 后调用 `putty_args::parse_putty_args`。
+2. `App::new_putty_direct` 构造一次性 `Host`，不写入 `hosts.toml`。
+3. App 进入 `PuttyDirect` 等待/错误视图，连接成功后直接切到 `Ssh` 模式。
+4. `-pw` 传入的临时密码仅保存在内存中，认证时尝试一次；direct 模式不会读取或写入系统钥匙串，也不会记录连接历史。
+5. SSH 退出后 direct 模式设置 `should_quit = true`，进程退出，不返回主机列表。
 
 #### `sftp/transfer.rs` — 文件传输
 
