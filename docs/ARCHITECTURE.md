@@ -605,16 +605,27 @@ App.start_remote_edit()
 |------|--------------|
 | macOS ARM | aarch64-apple-darwin |
 | macOS Intel | x86_64-apple-darwin |
-| Linux x86_64 | x86_64-unknown-linux-musl (静态链接) |
+| Linux ARM | aarch64-unknown-linux-gnu |
+| Linux x86_64 | x86_64-unknown-linux-gnu |
+| Windows x86 | i686-pc-windows-msvc |
 | Windows x86_64 | x86_64-pc-windows-msvc |
 
 ### CI/CD
 
-当前仓库尚未提交 CI workflow；后续可补充：
-- push 到主分支时运行测试 + clippy
-- tag `v*` 时自动构建各平台并发布 Release
+当前仓库使用 GitHub Actions：
 
-Linux 使用 musl 静态链接，确保单文件无动态库依赖。
+- `.github/workflows/ci.yml` 在 push / pull request 中运行 `cargo fmt --check`、`cargo check`、`cargo clippy -- -D warnings` 和 `cargo test`
+- `.github/workflows/release.yml` 由 cargo-dist 生成，并在 tag 发布前调用 `scripts/check-release-version.sh`，确保 tag 与 `Cargo.toml` 的 `package.version` 一致
+- tag `v*` 时 cargo-dist 构建六个平台二进制产物并发布 GitHub Release
+
+发布后可运行 `scripts/verify-release-assets.sh vX.Y.Z` 检查 GitHub Release、六个平台产物和 `sha256.sum` 覆盖情况。
+
+分发辅助文件：
+
+- `scripts/install.sh`：macOS / Linux `curl | sh` 安装脚本，按系统与架构选择 release asset，并用 `sha256.sum` 校验
+- `packaging/homebrew/sush.rb`：Homebrew formula 草稿，当前基于已发布的 v1.1.0 macOS arm64/x86_64 产物
+
+正式发布仍以 `Cargo.toml` 的 `version` 字段作为唯一版本来源；开发期不提前修改发布版本号。
 
 ## 错误处理策略
 

@@ -1,10 +1,10 @@
 [package]
 name = "sush"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "A lightweight TUI SSH + SFTP manager"
 license = "MIT"
-repository = "https://github.com/lichen/sush.sh"
+repository = "https://github.com/0xlic/sush.sh"
 
 [dependencies]
 # Async runtime

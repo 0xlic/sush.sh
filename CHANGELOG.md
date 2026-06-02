@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.0] - 2026-06-02
+
+### Features
+
+- Add post-release asset verification
+- Add curl install script
+- Add release tag and Cargo version consistency guard to the release workflow
+- Run `cargo check` in CI alongside formatting, clippy, and tests
+- Document installation, upgrade, checksum verification, and the Homebrew formula draft
+
 ## [1.1.0] - 2026-06-02
 
 ### Bug Fixes

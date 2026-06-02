@@ -60,6 +60,9 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Check release tag matches Cargo.toml version
+        if: ${{ !github.event.pull_request }}
+        run: sh scripts/check-release-version.sh "${{ github.ref_name }}"
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
