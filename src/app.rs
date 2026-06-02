@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::widgets::ListState;
+use ratatui::widgets::{Block, ListState, Paragraph};
 use russh::ChannelMsg;
 
 use crate::config::history::ConnectionHistory;
@@ -57,6 +57,7 @@ pub enum AppMode {
     Edit,
     ImportSshConfig,
     Settings,
+    PuttyDirect,
     #[allow(dead_code)]
     FolderView,
     ForwardingManager,
@@ -501,6 +502,8 @@ pub struct App {
     pub forward_edit: Option<crate::tui::views::forward_edit::ForwardEditState>,
     secret_store: SecretStore,
     pwd_dialog: Option<PwdDialog>,
+    putty_direct: bool,
+    putty_temporary_password: Option<String>,
     #[cfg(test)]
     test_config_dir: Option<tempfile::TempDir>,
 }
@@ -581,9 +584,38 @@ impl App {
             forward_edit: None,
             secret_store: SecretStore::new(Box::new(SystemSecretBackend::new())),
             pwd_dialog: None,
+            putty_direct: false,
+            putty_temporary_password: None,
             #[cfg(test)]
             test_config_dir: None,
         })
+    }
+
+    pub fn new_putty_direct(launch: crate::putty_args::PuttyLaunch) -> Result<Self> {
+        let mut app = Self::new()?;
+        app.configure_putty_direct(launch, &default_putty_user())?;
+        Ok(app)
+    }
+
+    fn configure_putty_direct(
+        &mut self,
+        launch: crate::putty_args::PuttyLaunch,
+        default_user: &str,
+    ) -> Result<()> {
+        let temporary_password = launch.temporary_password.clone();
+        let host = launch.to_transient_host(default_user)?;
+
+        self.hosts = vec![host];
+        self.filtered_indices = vec![0];
+        self.list_state = ListState::default();
+        self.list_state.select(Some(0));
+        self.search_query.clear();
+        self.show_import_prompt = false;
+        self.putty_direct = true;
+        self.putty_temporary_password = temporary_password;
+        self.mode = AppMode::PuttyDirect;
+        self.trigger_connect = true;
+        Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -670,14 +702,16 @@ impl App {
                         && let Err(e) =
                             self.start_pending_connection(PendingConnectionKind::Ssh, host)
                     {
-                        self.connection_history.record(
-                            &self.hosts[self
-                                .filtered_indices
-                                .get(self.list_state.selected().unwrap_or(0))
-                                .copied()
-                                .unwrap_or(idx)]
-                            .alias,
-                        );
+                        if self.should_record_connection_history() {
+                            self.connection_history.record(
+                                &self.hosts[self
+                                    .filtered_indices
+                                    .get(self.list_state.selected().unwrap_or(0))
+                                    .copied()
+                                    .unwrap_or(idx)]
+                                .alias,
+                            );
+                        }
                         self.set_status(format!("Connection failed: {e}"));
                     }
                 }
@@ -695,14 +729,16 @@ impl App {
                         && let Err(e) =
                             self.start_pending_connection(PendingConnectionKind::Sftp, host)
                     {
-                        self.connection_history.record(
-                            &self.hosts[self
-                                .filtered_indices
-                                .get(self.list_state.selected().unwrap_or(0))
-                                .copied()
-                                .unwrap_or(idx)]
-                            .alias,
-                        );
+                        if self.should_record_connection_history() {
+                            self.connection_history.record(
+                                &self.hosts[self
+                                    .filtered_indices
+                                    .get(self.list_state.selected().unwrap_or(0))
+                                    .copied()
+                                    .unwrap_or(idx)]
+                                .alias,
+                            );
+                        }
                         self.set_status(format!("SFTP failed: {e}"));
                     }
                 }
@@ -911,7 +947,11 @@ impl App {
         }
 
         match self.mode {
-            AppMode::Main | AppMode::Sftp | AppMode::ForwardingManager | AppMode::Settings => {
+            AppMode::Main
+            | AppMode::Sftp
+            | AppMode::ForwardingManager
+            | AppMode::Settings
+            | AppMode::PuttyDirect => {
                 for key in decode_tui_keys(&data) {
                     self.handle_key(key);
                 }
@@ -969,6 +1009,7 @@ impl App {
             AppMode::Sftp => self.handle_sftp_key(k),
             AppMode::ForwardingManager => self.handle_forwarding_key(k),
             AppMode::Settings => self.handle_settings_key(k),
+            AppMode::PuttyDirect => self.handle_putty_direct_key(k),
             AppMode::Ssh | AppMode::Edit | AppMode::ImportSshConfig | AppMode::FolderView => {}
         }
     }
@@ -1128,6 +1169,34 @@ impl App {
                 self.toggle_putty_compat_launcher();
             }
             _ => {}
+        }
+    }
+
+    fn handle_putty_direct_key(&mut self, k: KeyEvent) {
+        match (k.code, k.modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::NONE)
+            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn should_record_connection_history(&self) -> bool {
+        !self.putty_direct
+    }
+
+    fn should_persist_credentials(&self) -> bool {
+        !self.putty_direct
+    }
+
+    fn leave_connected_mode_after_disconnect(&mut self) {
+        self.clear_connection_state();
+        if self.putty_direct {
+            self.mode = AppMode::PuttyDirect;
+            self.should_quit = true;
+        } else {
+            self.mode = AppMode::Main;
         }
     }
 
@@ -1681,7 +1750,9 @@ impl App {
                 };
 
                 if let Err(error) = finish_result {
-                    self.connection_history.record(&host.alias);
+                    if self.should_record_connection_history() {
+                        self.connection_history.record(&host.alias);
+                    }
                     let prefix = match pending.kind {
                         PendingConnectionKind::Ssh => "Connection failed",
                         PendingConnectionKind::Sftp => "SFTP failed",
@@ -3150,7 +3221,9 @@ impl App {
         self.current_host_hostname = Some(host.hostname.clone());
         self.active_session = Some(session);
         self.mode = AppMode::Sftp;
-        self.connection_history.record(&host.alias);
+        if self.should_record_connection_history() {
+            self.connection_history.record(&host.alias);
+        }
         Ok(())
     }
 
@@ -3739,7 +3812,9 @@ impl App {
         self.current_host_alias = Some(host.alias.clone());
         self.current_host_hostname = Some(host.hostname.clone());
         self.mode = AppMode::Ssh;
-        self.connection_history.record(&host.alias);
+        if self.should_record_connection_history() {
+            self.connection_history.record(&host.alias);
+        }
         self.ssh_last_size = Some((cols, rows));
         Ok(())
     }
@@ -3774,7 +3849,8 @@ impl App {
                 SecretKind::KeyPassphrase,
                 Some(identity_hint.as_str()),
             );
-            if let Ok(Some(pass)) = self.secret_store.get(&key_passphrase_key)
+            if self.should_persist_credentials()
+                && let Ok(Some(pass)) = self.secret_store.get(&key_passphrase_key)
                 && try_key_auth(&mut session.handle, &host.user, &expanded, Some(&pass))
                     .await
                     .unwrap_or(false)
@@ -3789,18 +3865,32 @@ impl App {
                     .await
                     .unwrap_or(false)
             {
-                match self.secret_store.set(&key_passphrase_key, &pass) {
-                    Ok(()) => self.clear_secret_save_failure(&key_passphrase_key.account),
-                    Err(error) => {
-                        self.record_secret_save_failure(key_passphrase_key.account.clone(), &error)
+                if self.should_persist_credentials() {
+                    match self.secret_store.set(&key_passphrase_key, &pass) {
+                        Ok(()) => self.clear_secret_save_failure(&key_passphrase_key.account),
+                        Err(error) => self
+                            .record_secret_save_failure(key_passphrase_key.account.clone(), &error),
                     }
                 }
                 return Ok(session);
             }
         }
 
+        if let Some(pass) = self.putty_temporary_password.as_deref() {
+            let ok = session
+                .handle
+                .authenticate_password(&host.user, pass)
+                .await?
+                .success();
+            if ok {
+                return Ok(session);
+            }
+        }
+
         let password_key = SecretKey::new(&host.id, SecretKind::LoginPassword, None);
-        if let Ok(Some(pass)) = self.secret_store.get(&password_key) {
+        if self.should_persist_credentials()
+            && let Ok(Some(pass)) = self.secret_store.get(&password_key)
+        {
             let ok = session
                 .handle
                 .authenticate_password(&host.user, &pass)
@@ -3819,10 +3909,12 @@ impl App {
                 .await?
                 .success();
             if ok {
-                match self.secret_store.set(&password_key, &pass) {
-                    Ok(()) => self.clear_secret_save_failure(&password_key.account),
-                    Err(error) => {
-                        self.record_secret_save_failure(password_key.account.clone(), &error)
+                if self.should_persist_credentials() {
+                    match self.secret_store.set(&password_key, &pass) {
+                        Ok(()) => self.clear_secret_save_failure(&password_key.account),
+                        Err(error) => {
+                            self.record_secret_save_failure(password_key.account.clone(), &error)
+                        }
                     }
                 }
                 return Ok(session);
@@ -3893,8 +3985,7 @@ impl App {
 
     async fn resume_ssh_from_sftp(&mut self) -> Result<()> {
         let Some(session) = self.active_session.as_mut() else {
-            self.clear_connection_state();
-            self.mode = AppMode::Main;
+            self.leave_connected_mode_after_disconnect();
             return Ok(());
         };
 
@@ -4011,8 +4102,7 @@ impl App {
         if let Some(session) = self.active_session.take() {
             let _ = session.disconnect().await;
         }
-        self.clear_connection_state();
-        self.mode = AppMode::Main;
+        self.leave_connected_mode_after_disconnect();
         Ok(())
     }
 
@@ -4175,6 +4265,15 @@ impl App {
             AppMode::Settings => {
                 let status = self.putty_shim_status();
                 settings_view::render(f, &status, &self.metadata.putty_compat);
+            }
+            AppMode::PuttyDirect => {
+                let status = self
+                    .main_status_message()
+                    .unwrap_or("Preparing PuTTY compatibility SSH launch...");
+                f.render_widget(
+                    Paragraph::new(status).block(Block::bordered().title(" sush PuTTY launch ")),
+                    f.area(),
+                );
             }
             AppMode::FolderView => {
                 if let Some(fv) = &self.folder_view_state {
@@ -4609,6 +4708,12 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
+fn default_putty_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4682,6 +4787,8 @@ mod tests {
             forward_edit: None,
             secret_store: SecretStore::new(Box::new(FakeBackend::available())),
             pwd_dialog: None,
+            putty_direct: false,
+            putty_temporary_password: None,
             test_config_dir: Some(test_config_dir),
         }
     }
@@ -4920,6 +5027,51 @@ mod tests {
             assert!(!app.metadata.putty_compat.enabled);
             assert!(app.metadata.putty_compat.last_error.is_some());
         }
+    }
+
+    #[test]
+    fn putty_direct_configuration_uses_transient_host_and_password() {
+        let mut app = app_with(vec![mk("saved")]);
+        let launch = crate::putty_args::parse_putty_args(
+            ["-ssh", "-l", "deploy", "-pw", "secret", "prod.example.com"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+
+        app.configure_putty_direct(launch, "fallback").unwrap();
+
+        assert_eq!(app.mode, AppMode::PuttyDirect);
+        assert!(app.putty_direct);
+        assert_eq!(app.hosts.len(), 1);
+        assert_eq!(app.hosts[0].alias, "deploy@prod.example.com");
+        assert_eq!(app.putty_temporary_password.as_deref(), Some("secret"));
+        assert!(app.trigger_connect);
+    }
+
+    #[test]
+    fn putty_direct_disconnect_exits_instead_of_returning_to_main() {
+        let mut app = app_with(vec![mk("web")]);
+        app.putty_direct = true;
+        app.mode = AppMode::Ssh;
+
+        app.leave_connected_mode_after_disconnect();
+
+        assert!(app.should_quit);
+        assert_eq!(app.mode, AppMode::PuttyDirect);
+    }
+
+    #[test]
+    fn putty_direct_skips_history_and_secret_persistence() {
+        let mut app = app_with(vec![mk("web")]);
+
+        assert!(app.should_record_connection_history());
+        assert!(app.should_persist_credentials());
+
+        app.putty_direct = true;
+
+        assert!(!app.should_record_connection_history());
+        assert!(!app.should_persist_credentials());
     }
 
     #[test]

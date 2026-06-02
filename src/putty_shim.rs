@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -177,6 +179,80 @@ pub fn decode_shim_config(content: &str) -> Result<ShimConfig> {
     toml::from_str(content).context("failed to decode PuTTY shim config")
 }
 
+pub fn is_putty_shim_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("putty.exe") || name == "putty")
+}
+
+pub fn is_current_putty_shim() -> bool {
+    std::env::current_exe()
+        .ok()
+        .as_deref()
+        .is_some_and(is_putty_shim_path)
+}
+
+pub fn launch_terminal_from_current_shim(args: &[String]) -> Result<()> {
+    let shim_exe = std::env::current_exe().context("failed to locate PuTTY shim executable")?;
+    let config_path = shim_exe
+        .parent()
+        .map(|parent| parent.join("putty-shim.toml"))
+        .ok_or_else(|| anyhow::anyhow!("failed to locate PuTTY shim config directory"))?;
+    let config = decode_shim_config(
+        &fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?,
+    )?;
+    launch_terminal(&config.sush_exe_path, args)
+}
+
+pub fn launch_terminal(sush_exe: &Path, args: &[String]) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let candidates = terminal_launch_candidates(sush_exe, args);
+        let mut last_error = None;
+        for candidate in candidates {
+            let Some((program, rest)) = candidate.split_first() else {
+                continue;
+            };
+            match Command::new(program).args(rest).spawn() {
+                Ok(_) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        bail!(
+            "failed to launch terminal for PuTTY compatibility: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "no launch command was available".into())
+        );
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (sush_exe, args);
+        bail!("PuTTY shim terminal launch is only supported on Windows");
+    }
+}
+
+pub fn terminal_launch_candidates(sush_exe: &Path, args: &[String]) -> Vec<Vec<String>> {
+    let compat_args = std::iter::once("--putty-compatible".to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>();
+    let sush = sush_exe.display().to_string();
+
+    vec![
+        std::iter::once("wt.exe".to_string())
+            .chain(["new-tab".to_string(), "--title".to_string(), "sush".to_string()])
+            .chain(std::iter::once(sush.clone()))
+            .chain(compat_args.clone())
+            .collect(),
+        std::iter::once("cmd.exe".to_string())
+            .chain(["/C".to_string(), "start".to_string(), "sush".to_string(), sush])
+            .chain(compat_args)
+            .collect(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +358,23 @@ mod tests {
         let disabled_status = disable(dir.path(), &mut metadata).unwrap();
         assert!(!disabled_status.enabled);
         assert!(!metadata.enabled);
+    }
+
+    #[test]
+    fn putty_direct_shim_detection_matches_putty_exe_name() {
+        assert!(is_putty_shim_path(std::path::Path::new("C:/Tools/putty.exe")));
+        assert!(is_putty_shim_path(std::path::Path::new("putty")));
+        assert!(!is_putty_shim_path(std::path::Path::new("sush.exe")));
+    }
+
+    #[test]
+    fn putty_direct_terminal_command_adds_compat_marker() {
+        let args = vec!["-ssh".to_string(), "deploy@prod.example.com".to_string()];
+        let candidates = terminal_launch_candidates(std::path::Path::new("C:/Tools/sush.exe"), &args);
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.iter().any(|part| part == "--putty-compatible")
+                && candidate.iter().any(|part| part == "deploy@prod.example.com")
+        }));
     }
 }
