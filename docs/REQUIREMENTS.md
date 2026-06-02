@@ -8,6 +8,7 @@
 - `v0.1` 记录 MVP 基础范围
 - `v0.2` 及后续版本记录相对于前一版本的新增或调整需求
 - `v1.0` 记录稳定发布阶段的验收要求
+- `v1.1` 记录终端 scrollback、文本复制和 SFTP 导航体验增强
 
 `docs/REQUIREMENTS.md` 继续保留为入口索引，不再承载完整需求正文。
 
@@ -24,6 +25,7 @@
 | v0.7 | [v0.7](requirements/v0.7.md) | 完善文件操作 |
 | v0.8 | [v0.8](requirements/v0.8.md) | 高级网络功能 |
 | v1.0 | [v1.0](requirements/v1.0.md) | 稳定发布 |
+| v1.1 | [v1.1](requirements/v1.1.md) | 终端与 SFTP 体验增强 |
 
 ## 使用约定
 

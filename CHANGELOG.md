@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0] - 2026-06-02
+
+### Bug Fixes
+
+- Refine SFTP and main panel display details.
+- Reset upload resume when the remote target is already full-size.
+
+### Features
+
+- Add SFTP parent navigation, current-list search, and goto path navigation.
+- Add SSH terminal scrollback and mouse selection copy.
+
 ## [1.0.0] - 2026-05-02
 
 ### Features

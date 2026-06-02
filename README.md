@@ -50,6 +50,7 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 - Fuzzy search across hostname, IP, user, tags, and description
 - Path-type tags build a virtual folder sidebar right inside the main view
 - Embedded terminal emulator: `vim`, `tmux`, `htop` all work correctly
+- Scrollback, PageUp/PageDown history navigation, and mouse selection copy in normal terminal screens
 
 **Seamless SSH ↔ SFTP switching**
 - `Ctrl-\` flips between SSH shell and SFTP browser
@@ -62,7 +63,7 @@ Type to fuzzy-search. Hit Enter to connect. Hit `Ctrl-\` at any time to switch t
 - `d` to download, `u` to upload, with a global bottom-right transfer badge
 - Directory transfers keep the selected directory itself and show aggregate `N/M` progress
 - `e` to open a remote file in your system's default GUI app and auto-upload on save
-- `Enter` to navigate directories
+- `Enter` to enter directories, `Backspace`/`Left` to go up, `/` to filter the current list, and `g` to jump to a path
 - One connection-scoped FIFO queue keeps transfers running while you move between Main, SSH, and SFTP
 
 **Port forwarding management**
@@ -143,6 +144,8 @@ When the folder sidebar is visible, search is scoped to the current folder and t
 **SSH mode**
 | Key | Action |
 |-----|--------|
+| `PageUp` / `PageDown` | Scroll terminal history in normal screen mode |
+| Mouse drag | Select text and copy it on release in normal screen mode |
 | `Ctrl-\` | Switch to SFTP browser |
 | `exit` / `Ctrl-D` | Disconnect, return to host list |
 
@@ -154,6 +157,9 @@ When the folder sidebar is visible, search is scoped to the current folder and t
 | `Space` × 2 | Select the inclusive range from the anchor to the focused row |
 | `Esc` | Cancel multi-select for the active pane |
 | `Enter` | Open directory |
+| `Backspace` / `←` | Go to the parent directory for the active pane |
+| `/` | Filter the current directory list for the active pane |
+| `g` | Jump to a local or remote directory path |
 | `d` | Download the selected remote item, or all selected remote items in multi-select mode |
 | `u` | Upload the selected local item, or all selected local items in multi-select mode |
 | `D` | Delete all selected items in the active pane |
@@ -169,7 +175,7 @@ In SFTP multi-select mode, each pane keeps its own selection set. Press `Space` 
 
 Transfers now run through a single FIFO queue scoped to the current SSH connection. The bottom-right corner of Main, SSH, and SFTP shows a compact badge like `↑ 2/10 37%` or `↓ 2/10 37%`, so long-running transfers continue in the background without taking over the entire status line. Disconnecting the current connection clears the queue.
 
-For normal files, repeated uploads and downloads now resume from the existing target size when it is smaller than or equal to the source. If the target is larger than the source, `sush` restarts that file from zero. This first version does not add hash verification or cross-restart resume records.
+For normal files, repeated downloads resume from the existing local target size when it is smaller than or equal to the remote source. Repeated uploads resume only when the remote target is smaller than the local source; if the remote target is already full-size or larger, `sush` restarts that file from zero. This first version does not add hash verification or cross-restart resume records.
 
 ---
 
@@ -189,6 +195,8 @@ For normal files, repeated uploads and downloads now resume from the existing ta
 
 - Terminal programs (`vim`, `tmux`, `htop`) work correctly via full VT100 emulation
 - `Ctrl-\` is intercepted as a prefix key within the TUI; everything else is forwarded to the remote
+- Normal screen output keeps scrollback history; PageUp/PageDown and mouse wheel move the visible offset
+- Mouse drag selection is highlighted locally and copied to the system clipboard on release
 - SSH and SFTP share the same TCP connection via separate channels — switching is instant and doesn't re-authenticate
 
 ---
@@ -205,7 +213,8 @@ For normal files, repeated uploads and downloads now resume from the existing ta
 | **v0.6** ✅ | System keyring credential storage · silent save after successful auth · temporary input only when Secret Service is unavailable |
 | **v0.7** ✅ | Recursive folder transfer with aggregate progress · remote file editing with auto-upload on save · dual-pane SFTP · background transfer queue · resume support |
 | **v0.8** ✅ | Port forwarding manager · single-hop ProxyJump · SOCKS5 proxy · tunnel status view |
-| v1.0 | macOS smoke test · GitHub Actions binary releases · doc consistency |
+| **v1.0** ✅ | macOS smoke test · GitHub Actions binary releases · doc consistency |
+| **v1.1** ✅ | SSH scrollback · mouse selection copy · SFTP parent navigation · list search · goto path |
 
 ---
 
